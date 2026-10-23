@@ -1,0 +1,61 @@
+networks:
+  app-networks:
+    driver: bridge
+services:
+  ollama:
+      image: ollama/ollama
+      volumes:
+        - ./Agentes/ollama-models:/root/.ollama
+      ports:
+        - 11434:11434
+      networks:
+        - app-networks
+  back-end:
+    build:
+      context: ./Back-end
+      dockerfile: Dockerfile
+    depends_on:
+      - ollama
+    develop:
+      watch:
+        - action: sync
+          path: ./Back-end/
+          target: /Back-end/app
+          initial_sync: true
+          ignore:
+            - __pycache__/
+        - action: rebuild
+          path: requirements.txt
+    ports:
+      - "3000:3000"
+    networks:
+      - app-networks
+  front-end:
+    build:
+      context: ./Front-end
+      dockerfile: Dockerfile.dev
+    develop:
+      watch:
+        - action: sync
+          path: ./Front-end/app
+          target: /app/
+          initial_sync: true
+          ignore:
+            - node_modules/
+        - action: rebuild
+          path: ./Front-end/app/package.json
+    ports:
+      - "5173:5173"
+    networks:
+      - app-networks
+  nginx:
+    image: nginx:stable-alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - back-end
+      - front-end
+    networks:
+      - app-networks
