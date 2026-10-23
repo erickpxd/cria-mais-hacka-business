@@ -10,10 +10,26 @@ services:
         - 11434:11434
       networks:
         - app-networks
+      healthcheck:
+        test: ["CMD", "ollama", "list"]
+        interval: 5s
+        timeout: 5s
+        retries: 20
+  ollama-pull:
+    image: ollama/ollama
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: ["ollama", "pull", "llava:13b"]
+    restart: "no"
+
   back-end:
     build:
       context: ./Back-end
       dockerfile: Dockerfile
+      network: host
     depends_on:
       - ollama
     develop:
@@ -59,3 +75,6 @@ services:
       - front-end
     networks:
       - app-networks
+
+volumes:
+  Agentes:
