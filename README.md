@@ -10,3 +10,10 @@
 ``` docker compose up ``` para ter todos os logs disponiveis
 
 Para acessar o app use o link ```http://localhost:5173/```
+
+# Arquitetura da solução
+- Docker *(único necessário ter instalado)*
+- FastAPI (Python) com CORS
+- React (JavaScript)
+- Nginx
+- Ollama
