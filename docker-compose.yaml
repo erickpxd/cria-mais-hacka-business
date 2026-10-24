@@ -1,8 +1,10 @@
 networks:
   app-networks:
     driver: bridge
+
 services:
   ollama:
+<<<<<<< HEAD
       image: ollama/ollama
       volumes:
         - ./Agentes/ollama-models:/root/.ollama
@@ -16,36 +18,76 @@ services:
         timeout: 5s
         retries: 20
   ollama-pull:
+=======
+    image: ollama/ollama
+    volumes:
+      - ./Agentes/ollama-models:/root/.ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=10m
+      - OLLAMA_NUM_PARALLEL=1
+    # Se tiver GPU NVIDIA, descomente:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+    networks:
+      - app-networks
+
+  ollama-init:
+>>>>>>> a75e73a (Apply application updates on develop)
     image: ollama/ollama
     depends_on:
       ollama:
         condition: service_healthy
     environment:
       - OLLAMA_HOST=http://ollama:11434
+<<<<<<< HEAD
     entrypoint: ["ollama", "pull", "llava:13b"]
     restart: "no"
+=======
+    entrypoint: ["ollama", "pull", "llava"]
+    restart: "no"
+    networks:
+      - app-networks
+>>>>>>> a75e73a (Apply application updates on develop)
 
   back-end:
     build:
       context: ./Back-end
       dockerfile: Dockerfile
+<<<<<<< HEAD
       network: host
+=======
+    command: ["fastapi", "dev", "app/main.py", "--host", "0.0.0.0", "--port", "80"]
+    environment:
+      - OLLAMA_URL=http://ollama:11434
+      - MODELO_VISAO=llava
+>>>>>>> a75e73a (Apply application updates on develop)
     depends_on:
-      - ollama
+      ollama:
+        condition: service_healthy
     develop:
       watch:
         - action: sync
-          path: ./Back-end/
-          target: /Back-end/app
-          initial_sync: true
+          path: ./Back-end/app
+          target: /code/app
           ignore:
             - __pycache__/
         - action: rebuild
-          path: requirements.txt
+          path: ./Back-end/requirements.txt
     ports:
-      - "3000:3000"
+      - "3000:80"
     networks:
       - app-networks
+
   front-end:
     build:
       context: ./Front-end
@@ -60,10 +102,9 @@ services:
             - node_modules/
         - action: rebuild
           path: ./Front-end/app/package.json
-    ports:
-      - "5173:5173"
     networks:
       - app-networks
+
   nginx:
     image: nginx:stable-alpine
     ports:
