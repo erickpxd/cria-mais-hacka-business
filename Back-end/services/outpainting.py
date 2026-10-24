@@ -1,48 +1,170 @@
-"""Integração de outpainting com o IOPaint.
+import asyncio
+import base64
+import io
+import logging
+import math
 
-Este módulo ainda precisa ser implementado. O objetivo é adaptar uma imagem que
-não atende à proporção configurada, adicionando conteúdo nas bordas sem alterar
-a área original. O IOPaint expõe inpainting, portanto o outpainting será
-simulado criando uma tela maior e pedindo ao modelo para preencher as áreas
-externas.
+import httpx
+import numpy as np
 
-Guia de implementação para o próximo desenvolvedor:
+from PIL import Image, ImageOps, UnidentifiedImageError
 
-1. Receber os bytes da imagem e decodificá-los com Pillow ou OpenCV. Caso a
-   imagem seja inválida, devolver um erro explícito compatível com o padrão dos
-   outros serviços.
-2. Ler a proporção alvo a partir de ``app.config.settings``. Não duplicar
-   valores fixos neste arquivo; a mesma configuração deve ser usada pela
-   validação técnica.
-3. Calcular o maior canvas que preserve toda a imagem original e atenda à
-   proporção alvo. Centralizar a imagem original no canvas e registrar os
-   offsets ``x`` e ``y`` para montar a máscara corretamente.
-4. Preencher inicialmente as áreas novas com uma réplica ou extensão dos pixels
-   das bordas. Esse preenchimento fornece contexto visual ao modelo, mas não
-   deve ser tratado como resultado final.
-5. Criar uma máscara no mesmo tamanho do canvas:
-   - preto (0): pixels pertencentes à imagem original, que devem ser preservados;
-   - branco (255): áreas adicionadas, que o IOPaint deve gerar.
-6. Codificar a tela e a máscara em base64 no formato aceito pela API do
-   IOPaint e enviar uma requisição ``POST /api/v1/inpaint``.
-7. Usar um cliente HTTP assíncrono, timeout configurável e tratamento explícito
-   para timeout, indisponibilidade do serviço, resposta HTTP inválida e JSON
-   sem a imagem esperada. Não retornar uma imagem de sucesso quando a API
-   falhar.
-8. Decodificar a imagem retornada, verificar se ela é válida e devolvê-la no
-   formato definido pelo chamador. Se a API retornar uma resposta diferente,
-   registrar o erro sem expor dados sensíveis nos logs.
-9. Adicionar testes para proporções já corretas, imagens horizontais e
-   verticais, offsets da máscara, imagem inválida e falhas do IOPaint.
+log = logging.getLogger(__name__)
 
-Contrato sugerido:
 
-    async def expandir_imagem(contents: bytes) -> bytes:
-        ...
 
-O chamador deve decidir quando usar este serviço (por exemplo, antes da
-análise de visão) e deve preservar o arquivo original para auditoria ou para
-retorno ao usuário. Esta etapa não substitui a validação técnica: depois do
-outpainting, a imagem resultante ainda precisa ser validada antes de ser
-enviada ao modelo de visão.
-"""
+class ErroOutpainting(Exception):
+    """Erro controlado durante a expansão da imagem."""
+
+    def __init__(self, status: int, mensagem: str):
+        super().__init__(mensagem)
+        self.status = status
+        self.mensagem = mensagem
+
+def _abrir_imagem(contents : bytes) -> Image.Image:
+    """Decodifica os bytes e devolve uma imagem RGB válida."""
+
+    try:
+         with Image.open(io.BytesIO(contents) as imagem): 
+            imagem.load()
+            return ImageOps.exif_transpose(imagem).convert("RGB")
+         
+    except(UnidentifiedImageError, OSError, ValueError) as exc:
+         raise ErroOutpainting(
+            400, "O arquivo recebido não é uma imagem válida."
+        ) from exc
+
+
+
+def _preparar_canvas(
+    imagem: Image.Image,
+) -> tuple[Image.Image, Image.Image, int, int]:
+    """
+    Cria a tela expandida e a máscara.
+
+    Máscara preta: imagem original.
+    Máscara branca: regiões externas que o IOPaint preencherá.
+    """
+    largura, altura = imagem.size
+
+    proporcao_alvo = (
+        settings.proporcao_largura / settings.proporcao_altura
+    )
+
+    if proporcao_alvo <= 0:
+        raise ErroOutpainting(500, "A proporção configurada é inválida.")
+
+    # Se a proporção já estiver dentro da tolerância, não expandimos.
+    proporcao_atual = largura / altura
+    if abs(proporcao_atual - proporcao_alvo) <= settings.tolerancia_proporcao:
+        return imagem, None, 0, 0
+
+    # Aumenta somente uma dimensão, sem reduzir nem cortar a original.
+    if proporcao_atual < proporcao_alvo:
+        nova_largura = math.ceil(altura * proporcao_alvo)
+        nova_altura = altura
+    else:
+        nova_largura = largura
+        nova_altura = math.ceil(largura / proporcao_alvo)
+
+    esquerda = (nova_largura - largura) // 2
+    direita = nova_largura - largura - esquerda
+    topo = (nova_altura - altura) // 2
+    base = nova_altura - altura - topo
+
+    # Estende provisoriamente os pixels das bordas.
+    pixels = np.asarray(imagem)
+    pixels_expandidos = np.pad(
+        pixels,
+        ((topo, base), (esquerda, direita), (0, 0)),
+        mode="edge",
+    )
+    canvas = Image.fromarray(pixels_expandidos.astype(np.uint8))
+
+    # Preto = original; branco = áreas que a IA deve preencher.
+    mascara = Image.new("L", (nova_largura, nova_altura), 255)
+    mascara.paste(0, (esquerda, topo, esquerda + largura, topo + altura))
+
+    return canvas, mascara, esquerda, topo
+
+
+
+def _para_base64(imagem: Image.Image) -> str:
+    """Codifica uma imagem PNG em base64."""
+    buffer = io.BytesIO()
+    imagem.save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+
+def _validar_bytes_imagem(contents: bytes) -> Image.Image:
+    """Confirma que a resposta contém uma imagem decodificável."""
+    try:
+        with Image.open(io.BytesIO(contents)) as imagem:
+            imagem.load()
+            return imagem.convert("RGB")
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise ErroOutpainting(
+            502, "O IOPaint não retornou uma imagem válida."
+        ) from exc
+
+
+
+async def expandir_imagem(contents: bytes) -> bytes:
+    """Expande a imagem usando o serviço IOPaint."""
+    imagem_original = _abrir_imagem(contents)
+    canvas, mascara, x, y = _preparar_canvas(imagem_original)
+
+    # Nenhuma expansão necessária.
+    if mascara is None:
+        return contents
+
+    payload = {
+        "image": _para_base64(canvas),
+        "mask": _para_base64(mascara),
+        "prompt": "Continue naturalmente o cenário ao redor da imagem.",
+        "negative_prompt": "deformações, artefatos, baixa qualidade",
+    }
+
+    url = f"{settings.iopaint_url.rstrip('/')}/api/v1/inpaint"
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=settings.iopaint_timeout
+        ) as client:
+            resposta = await client.post(url, json=payload)
+            resposta.raise_for_status()
+
+    except httpx.TimeoutException as exc:
+        raise ErroOutpainting(
+            504, "O IOPaint demorou demais para responder."
+        ) from exc
+
+    except httpx.HTTPStatusError as exc:
+        log.warning(
+            "IOPaint retornou status HTTP %s.",
+            exc.response.status_code,
+        )
+        raise ErroOutpainting(
+            502, "O IOPaint rejeitou a requisição."
+        ) from exc
+
+    except httpx.RequestError as exc:
+        log.warning("Não foi possível conectar ao IOPaint.")
+        raise ErroOutpainting(
+            503, "O serviço IOPaint está indisponível."
+        ) from exc
+
+    imagem_gerada = _validar_bytes_imagem(resposta.content)
+
+    if imagem_gerada.size != canvas.size:
+        raise ErroOutpainting(
+            502, "O IOPaint retornou dimensões inesperadas."
+        )
+
+    # Recoloca os pixels originais para garantir sua preservação.
+    imagem_gerada.paste(imagem_original, (x, y))
+
+    buffer = io.BytesIO()
+    imagem_gerada.save(buffer, format="PNG")
+    return buffer.getvalue()
