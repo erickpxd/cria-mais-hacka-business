@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.db import init_db
-from app.routes import aprovacoes, artes, projetos
+from app.routes import approvals, images, projects
 from app.services.erros import ErroNegocio
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -34,9 +34,9 @@ async def tratar_erro_negocio(_: Request, exc: ErroNegocio):
     return JSONResponse(status_code=exc.status, content={"detail": exc.mensagem})
 
 
-app.include_router(projetos.router)
-app.include_router(artes.router)
-app.include_router(aprovacoes.router)
+app.include_router(projects.router)
+app.include_router(images.router)
+app.include_router(approvals.router)
 
 
 @app.get("/api")

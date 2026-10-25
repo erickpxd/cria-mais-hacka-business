@@ -6,7 +6,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from app.config import settings
 from app.schemas import ResultadoAnalise, Saude
-from app.services import tecnico, visao
+from app.services import technician as tecnico, vision as visao
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")

@@ -21,7 +21,7 @@ const style = {
   title: {
     fontSize: '2.5rem',
     fontWeight: '700',
-    color: '#0d6efd', // Azul Bootstrap
+    color: '#0d6efd',
     marginBottom: '10px',
   },
   subtitle: {

@@ -8,7 +8,7 @@ from app.db import get_db
 from app.deps import exigir_revisor, usuario_atual
 from app.models import Aprovacao, Arte, EventoDecisao, agora
 from app.serializers import (iso, nome_usuario, ser_analise, ser_arte, ser_comentario, ser_versao, versao_atual)
-from app.services import armazenamento
+from app.services import storage as armazenamento
 from app.services.erros import ErroNegocio
 from app.services.formatos import nome_canal
 
