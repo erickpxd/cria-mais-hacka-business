@@ -7,19 +7,11 @@ from pydantic import ValidationError
 
 from app.config import settings
 from app.schemas import AnaliseVisao
+from app.services.erros import ErroServicoIA
 
 log = logging.getLogger(__name__)
 
 client = AsyncClient(host=settings.ollama_url, timeout=settings.ollama_timeout)
-
-
-class ErroServicoIA(Exception):
-    """Erro ao falar com o Ollama, já com o status HTTP que a API deve devolver."""
-
-    def __init__(self, status: int, mensagem: str):
-        super().__init__(mensagem)
-        self.status = status
-        self.mensagem = mensagem
 
 
 async def _chat(**kwargs):
