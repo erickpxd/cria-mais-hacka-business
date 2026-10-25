@@ -1,5 +1,10 @@
 fastapi[standard]
-
-Pillow
-
+pydantic-settings
+sqlalchemy>=2
+httpx
+pillow
+numpy
+opencv-python-headless
+pypdf
+python-docx
 ollama
