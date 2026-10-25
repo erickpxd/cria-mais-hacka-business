@@ -5,7 +5,7 @@ import time
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from app.config import settings
-from app.schemas import ResultadoAnalise, Saude
+from app.schemas import ResultadoAnalise
 from app.services import technician as tecnico, vision as visao
 
 log = logging.getLogger(__name__)
@@ -24,12 +24,6 @@ async def _ler_upload(file: UploadFile) -> bytes:
     if not contents:
         raise HTTPException(400, "Arquivo vazio.")
     return contents
-
-
-@router.get("/saude", response_model=Saude)
-async def saude():
-    ollama_ok, modelo_ok = await visao.verificar_ollama()
-    return Saude(ollama=ollama_ok, modelo_visao_disponivel=modelo_ok)
 
 
 @router.post("/analisar", response_model=ResultadoAnalise)

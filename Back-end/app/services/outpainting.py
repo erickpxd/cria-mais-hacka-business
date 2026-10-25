@@ -25,7 +25,7 @@ def _abrir_imagem(contents : bytes) -> Image.Image:
     """Decodifica os bytes e devolve uma imagem RGB válida."""
 
     try:
-         with Image.open(io.BytesIO(contents) as imagem): 
+         with Image.open(io.BytesIO(contents)) as imagem:
             imagem.load()
             return ImageOps.exif_transpose(imagem).convert("RGB")
          
@@ -38,6 +38,7 @@ def _abrir_imagem(contents : bytes) -> Image.Image:
 
 def _preparar_canvas(
     imagem: Image.Image,
+    proporcao: tuple[int, int] | None = None,
 ) -> tuple[Image.Image, Image.Image, int, int]:
     """
     Cria a tela expandida e a máscara.
@@ -47,9 +48,11 @@ def _preparar_canvas(
     """
     largura, altura = imagem.size
 
-    proporcao_alvo = (
-        settings.proporcao_largura / settings.proporcao_altura
+    largura_alvo, altura_alvo = proporcao or (
+        settings.proporcao_largura,
+        settings.proporcao_altura,
     )
+    proporcao_alvo = largura_alvo / altura_alvo
 
     if proporcao_alvo <= 0:
         raise ErroOutpainting(500, "A proporção configurada é inválida.")
@@ -110,14 +113,19 @@ def _validar_bytes_imagem(contents: bytes) -> Image.Image:
 
 
 
-async def expandir_imagem(contents: bytes) -> bytes:
+async def expandir_imagem(contents: bytes, proporcao: tuple[int, int] | None = None) -> bytes:
     """Expande a imagem usando o serviço IOPaint."""
     imagem_original = _abrir_imagem(contents)
-    canvas, mascara, x, y = _preparar_canvas(imagem_original)
+    canvas, mascara, x, y = _preparar_canvas(imagem_original, proporcao)
 
     # Nenhuma expansão necessária.
     if mascara is None:
         return contents
+
+    if not settings.outpainting_ativo:
+        buffer = io.BytesIO()
+        canvas.save(buffer, format="PNG")
+        return buffer.getvalue()
 
     payload = {
         "image": _para_base64(canvas),

@@ -7,8 +7,8 @@ services:
     build:
       context: ./Back-end
       dockerfile: Dockerfile
-    # fastapi dev = recarrega sozinho quando o watch sincroniza o código
-    command: ["fastapi", "dev", "app/main.py", "--host", "0.0.0.0", "--port", "80"]
+    # Uvicorn inicia o módulo explicitamente; o watch sincroniza o código.
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "80"]
     environment:
       - DATABASE_URL=sqlite:////data/cria_mais.db
       - DATA_DIR=/data
@@ -32,6 +32,8 @@ services:
             - __pycache__/
         - action: rebuild
           path: ./Back-end/requirements.txt
+        - action: rebuild
+          path: ./Back-end/requirements-ocr.txt
     ports:
       - "3000:80"    # só para testar no /docs; o front fala com o back-end pelo Nginx
     networks:

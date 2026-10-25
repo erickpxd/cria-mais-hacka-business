@@ -57,7 +57,7 @@ class Arte(Base):
         back_populates="arte", cascade="all, delete-orphan", order_by="VersaoArte.numero"
     )
     comentarios: Mapped[list["Comentario"]] = relationship(
-        cascade="all, delete-orphan", order_by="Comentario.id"
+        back_populates="arte", cascade="all, delete-orphan", order_by="Comentario.id"
     )
 
 
@@ -128,6 +128,8 @@ class Comentario(Base):
     texto: Mapped[str] = mapped_column(Text)
     regiao: Mapped[dict | None] = mapped_column(JSON, default=None)
     criado_em: Mapped[datetime] = mapped_column(default=agora)
+
+    arte: Mapped[Arte] = relationship(back_populates="comentarios")
 
 
 class Aprovacao(Base):

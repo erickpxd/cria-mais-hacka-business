@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     max_arte_mb: int = 20
     extensoes_briefing: list[str] = [".pdf", ".docx", ".txt"]
     tipos_arte: list[str] = ["image/jpeg", "image/png", "image/webp"]
+    tipos_aceitos: list[str] = tipos_arte
+    max_upload_mb: int = 20
+    min_largura: int = 320
+    min_altura: int = 320
+    min_nitidez: float = 20.0
 
     # --- Usuários de demonstração (header X-Usuario) ---
     usuarios: dict[str, dict] = {
@@ -53,6 +58,10 @@ class Settings(BaseSettings):
     modelo_visao: str = "llava"
     modelo_ocr: str = "deepseek-ocr"
     ollama_timeout: float = 180.0
+    criterios_visao: list[str] = [
+        "A imagem é uma peça de comunicação visual utilizável.",
+        "O conteúdo principal está visível e legível.",
+    ]
 
     @property
     def max_briefing_bytes(self) -> int:
@@ -61,6 +70,10 @@ class Settings(BaseSettings):
     @property
     def max_arte_bytes(self) -> int:
         return self.max_arte_mb * 1024 * 1024
+
+    @property
+    def max_upload_bytes(self) -> int:
+        return self.max_upload_mb * 1024 * 1024
 
 
 settings = Settings()

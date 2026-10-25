@@ -42,7 +42,7 @@ Navegador ──:80──► NGINX ─┬─ /      ──► front-end (React/V
 
 ```
 projeto/
-├── docker-compose.yml          # Orquestra todos os serviços (com profiles opcionais)
+├── docker-compose.yaml         # Orquestra todos os serviços (com profiles opcionais)
 ├── nginx.conf                  # Porta de entrada: separa / (front) e /api (back-end)
 ├── .env.example                # Variáveis do compose (copie para .env)
 ├── .gitignore
@@ -51,8 +51,8 @@ projeto/
 ├── Back-end/
 │   ├── Dockerfile
 │   ├── requirements.txt        # Dependências leves (API, banco, imagens, PDF/DOCX)
-│   ├── requirements-ocr.txt    # Dependências pesadas (PaddlePaddle + PaddleOCR)
-│   └── app/
+│   ├── requirements-ocr.txt    # Dependências do PaddlePaddle/PaddleOCR
+│   ├── app/
 │       ├── main.py             # Cria o app, CORS, rotas, tratamento de erros, /api/saude
 │       ├── config.py           # TODOS os parâmetros (limites, URLs, regras)
 │       ├── db.py               # Conexão SQLAlchemy e criação das tabelas
@@ -62,28 +62,26 @@ projeto/
 │       ├── deps.py             # Usuário atual (X-Usuario) e checagem de revisor
 │       │
 │       ├── routes/             # Camada HTTP: só orquestra, sem regra pesada
-│       │   ├── projetos.py     # Dashboard, projetos, briefing (extrair, anexar, baixar)
-│       │   ├── artes.py        # Upload, versões, conferência, correções, envio, adaptação
-│       │   └── aprovacoes.py   # Abas, avaliação, aprovar, devolver, exportar
+│       │   ├── projects.py     # Dashboard, projetos, briefing (extrair, anexar, baixar)
+│       │   ├── arts.py         # Upload, versões, análise, correções, adaptação, comentários
+│       │   ├── images.py       # Análise e leitura de imagens
+│       │   └── approvals.py    # Abas, avaliação, aprovar, devolver, exportar
 │       │
 │       └── services/           # Regras de negócio e integrações
 │           ├── briefing.py     # Lê PDF/DOCX/TXT e extrai os campos (com a página)
 │           ├── ocr.py          # Interface do OCR (PaddleOCR por trás)
 │           ├── ortografia.py   # Cliente do LanguageTool
-│           ├── analise.py      # As 3 conferências: preço, escrita, margem
-│           ├── correcao.py     # Aplica correções aceitas numa CÓPIA da arte
+│           ├── analyses.py     # As conferências automáticas
+│           ├── corrections.py  # Aplica correções aceitas numa CÓPIA da arte
 │           ├── outpainting.py  # Estende o fundo via IOPaint (código do outro dev, corrigido)
-│           ├── adaptacao.py    # Leva a arte ao formato do canal (usa o outpainting)
+│           ├── adaptations.py  # Leva a arte ao formato do canal (usa o outpainting)
 │           ├── formatos.py     # Tabela de canais e tamanhos
 │           ├── armazenamento.py# Arquivos em disco, com proteção de caminho
 │           ├── erros.py        # ErroNegocio / ErroServicoIA (status HTTP + mensagem)
-│           └── visao.py        # OPCIONAL: llava via Ollama (fora do fluxo principal)
+│           └── vision.py       # OPCIONAL: llava via Ollama (fora do fluxo principal)
 │
 ├── iopaint/
 │   └── Dockerfile              # Imagem do IOPaint (não existe oficial no Docker Hub)
-│
-├── tests/
-│   └── e2e_cria_mais.py        # Teste ponta a ponta com serviços externos simulados
 │
 │   ── Pastas que existem no repositório mas NÃO fazem parte desta entrega ──
 ├── Front-end/                  # React (Dockerfile.dev, app/). Ainda aponta para as rotas antigas
@@ -105,7 +103,7 @@ routes/  ──chama──►  services/  ──usa──►  models/db
    └─ HTTP e validação   └─ regras, OCR, IA, arquivos
 ```
 
-Regra de ouro: **rotas não contêm regra de negócio**. Para mudar uma conferência, mexa em `services/analise.py`. Para trocar de OCR, em `services/ocr.py`.
+Regra de ouro: **rotas não contêm regra de negócio**. Para mudar uma conferência, mexa em `app/services/analyses.py`. Para trocar de OCR, em `app/services/ocr.py`.
 
 ---
 
@@ -137,15 +135,60 @@ A porta 3000 existe só para testar a API. O front fala com o back-end pelo Ngin
 
 **O primeiro build é demorado** (PaddlePaddle é grande) e a primeira leitura de OCR baixa os modelos para `Agentes/paddle-cache`. A primeira subida do IOPaint também baixa o modelo LaMa.
 
-### Rodando os testes
+### Validação local
+
+O backend deve ser validado em três etapas: sintaxe, configuração do Compose e
+endpoints HTTP. Execute os comandos a partir da raiz do repositório:
 
 ```bash
-cd Back-end
-pip install "fastapi[standard]" pydantic-settings sqlalchemy pypdf python-docx fpdf2 pillow opencv-python-headless numpy httpx ollama
-python ../tests/e2e_cria_mais.py
+# 1) Sintaxe Python
+python3 -m compileall -q Back-end/app
+
+# 2) Configuração resolvida do Compose
+docker compose config
+
+# 3) Subida da aplicação e dos serviços
+docker compose up -d --build
+
+# 4) Smoke tests da API
+curl -fsS http://localhost:3000/api
+curl -fsS http://localhost:3000/api/saude
+curl -fsS -H "X-Usuario: ana" http://localhost:3000/api/me
+curl -fsS -H "X-Usuario: ana" http://localhost:3000/api/formatos
+
+# 5) Estado dos containers
+docker compose ps
 ```
 
-O teste sobe servidores falsos de LanguageTool e IOPaint (seguindo os contratos reais) e um OCR falso que devolve o texto desenhado na arte. Todo o resto é o código real.
+O resultado esperado de `/api` é `{"status":"ok"}`. Em `/api/saude`, `api` e
+`languagetool` devem estar como `true`. Um usuário inválido deve retornar HTTP
+401. Para acompanhar erros de inicialização:
+
+```bash
+docker compose logs --tail=200 back-end languagetool
+```
+
+### Cache e rebuild
+
+O projeto usa dois tipos de persistência que não devem ser apagados durante uma
+subida normal:
+
+- `./data:/data`: banco SQLite, briefings e versões das artes;
+- `./Agentes/paddle-cache:/root/.paddlex`: modelos baixados pelo PaddleOCR.
+
+O `docker compose watch` sincroniza `Back-end/app` e refaz a imagem quando
+`requirements.txt` ou `requirements-ocr.txt` muda. Alterações apenas no código
+não exigem `--no-cache`. Use rebuild sem cache somente para diagnosticar uma
+imagem realmente inconsistente:
+
+```bash
+docker compose build --no-cache back-end
+docker compose up -d back-end
+```
+
+Não use `docker compose down -v` para corrigir problemas comuns: a opção `-v`
+remove volumes gerenciados pelo Compose. Os diretórios `data/` e
+`Agentes/paddle-cache/` são bind mounts e devem ser preservados.
 
 ---
 
@@ -159,6 +202,9 @@ Tudo está em `Back-end/app/config.py`. Qualquer valor pode ser sobrescrito por 
 | `DATA_DIR` | `/data` | Onde ficam briefings e versões das artes |
 | `OCR_MOTOR` / `OCR_LANG` | `paddle` / `latin` | Motor e idioma do OCR (confirmar no 1º teste real) |
 | `OCR_CONFIANCA_MIN` | `0.6` | Descarta leituras do OCR abaixo disso |
+| `MIN_LARGURA` / `MIN_ALTURA` | `320` / `320` | Resolução mínima para análise simples de imagens |
+| `MIN_NITIDEZ` | `20.0` | Nitidez mínima para análise simples de imagens |
+| `CRITERIOS_VISAO` | lista padrão | Critérios enviados ao modelo Ollama opcional |
 | `LANGUAGETOOL_URL` | `http://languagetool:8010` | Corretor ortográfico local |
 | `ORTOGRAFIA_IGNORAR` | `[]` | Marcas/termos que não devem ser "corrigidos" (formato JSON) |
 | `MARGEM_MINIMA_PCT` | `0.04` | Distância mínima do texto à borda (% do menor lado) |
@@ -167,7 +213,7 @@ Tudo está em `Back-end/app/config.py`. Qualquer valor pode ser sobrescrito por 
 | `OUTPAINTING_MAX_EXTENSAO` | `1.0` | Máximo de imagem nova gerada (1.0 = +100%) |
 | `MAX_BRIEFING_MB` / `MAX_ARTE_MB` | `20` | Limites de upload |
 
-Os formatos de publicação estão em `services/formatos.py`. **Feed (1080×1080) e Stories (1080×1920) vêm do design. WhatsApp e Banner do site estão com tamanhos provisórios** (o design só diz "modelo configurável" e "conforme o briefing") e precisam ser confirmados.
+Os formatos de publicação estão em `app/services/formatos.py`. **Feed (1080×1080) e Stories (1080×1920) vêm do design. WhatsApp e Banner do site estão com tamanhos provisórios** (o design só diz "modelo configurável" e "conforme o briefing") e precisam ser confirmados.
 
 ---
 
@@ -252,9 +298,277 @@ Todas as rotas começam com `/api`. O usuário é informado pelo header `X-Usuar
 | POST | `/artes/{id}/solicitar-ajustes` | Devolve ao criador com comentário |
 | GET | `/artes/{id}/exportar` | Baixa a versão aprovada (403 antes da aprovação) |
 
-**Sistema:** `GET /api` e `GET /api/saude` (estado do LanguageTool e do IOPaint).
+**Sistema:** `GET /api` e `GET /api/saude` (estado do LanguageTool, IOPaint e configuração do OCR).
+O endpoint `/api/saude` é único; a rota antiga de saúde da análise Ollama foi removida para evitar contratos conflitantes.
 
 Erros sempre voltam como `{"detail": "mensagem pronta para exibir"}`.
+
+## 7.1 Integração com o front-end
+
+Esta seção é o contrato de integração para quem estiver implementando o front-end.
+O front-end deve consumir somente os caminhos `/api/*`; não deve acessar diretamente
+o hostname interno `back-end`.
+
+### URLs
+
+| Ambiente | Base da API |
+|---|---|
+| Desenvolvimento pelo Nginx | `http://localhost/api` |
+| Backend direto para diagnóstico | `http://localhost:3000/api` |
+| Dentro da rede Docker | `http://back-end:80/api` |
+
+Em desenvolvimento no navegador, prefira sempre URLs relativas:
+
+```ts
+fetch("/api/projetos")
+```
+
+Isso mantém o mesmo código funcionando atrás do Nginx e evita configurar uma URL
+interna do Docker no browser.
+
+### Headers
+
+Todas as rotas que dependem de usuário aceitam o usuário de demonstração no header:
+
+```http
+X-Usuario: ana
+```
+
+Usuários disponíveis:
+
+```text
+ana     designer
+bruno   designer
+rafael  revisor
+```
+
+O header deve ser enviado em todas as requisições autenticadas. Se ele não for
+enviado, o backend usa `ana` como padrão. Um usuário desconhecido retorna `401`.
+
+Não defina manualmente `Content-Type` ao enviar `FormData`; o navegador precisa
+gerar o boundary multipart:
+
+```ts
+const form = new FormData();
+form.append("file", file);
+
+await fetch("/api/projetos/1/artes?canal=instagram_feed", {
+  method: "POST",
+  headers: { "X-Usuario": "ana" },
+  body: form,
+});
+```
+
+### Fluxo recomendado da tela
+
+1. Consulte `GET /api/me` e `GET /api/formatos` ao carregar a aplicação.
+2. Envie o briefing com `POST /api/briefings/extrair`.
+3. Mostre os campos retornados e envie o `token` em `POST /api/projetos`.
+4. Envie cada arte com `POST /api/projetos/{id}/artes?canal={canal}`.
+5. Consulte `GET /api/artes/{id}` até a análise deixar de estar pendente.
+6. Mostre os achados retornados em `analise.achados`.
+7. Envie decisões para `POST /api/artes/{id}/correcoes`.
+8. Quando a arte estiver pronta, use `POST /api/artes/{id}/enviar-aprovacao`.
+9. A tela de revisão usa `GET /api/aprovacoes` e `GET /api/aprovacoes/{id}`.
+10. Depois da aprovação, baixe `GET /api/artes/{id}/exportar`.
+
+### Upload de briefing
+
+```http
+POST /api/briefings/extrair
+Content-Type: multipart/form-data
+X-Usuario: ana
+```
+
+Campo multipart obrigatório: `file`.
+
+Extensões aceitas: `.pdf`, `.docx`, `.txt`. A resposta contém:
+
+```json
+{
+  "token": "token-hexadecimal",
+  "arquivo": "briefing.pdf",
+  "total_paginas": 2,
+  "campos": {},
+  "avisos": []
+}
+```
+
+O token é temporário e deve ser enviado sem alteração no campo
+`briefing_token` da criação do projeto.
+
+### Criação de projeto
+
+```http
+POST /api/projetos
+Content-Type: application/json
+X-Usuario: ana
+```
+
+Exemplo:
+
+```json
+{
+  "nome": "Campanha de verão",
+  "objetivo": "Divulgar o produto",
+  "descricao": "Campanha para redes sociais",
+  "prazo": "2026-12-20",
+  "produto": "Produto X",
+  "preco": "17,90",
+  "informacoes_obrigatorias": "Compre agora",
+  "orientacoes": "Usar identidade visual oficial",
+  "canais": ["instagram_feed", "instagram_stories"],
+  "briefing_token": "token-hexadecimal"
+}
+```
+
+O campo `canais` deve usar os slugs devolvidos por `GET /api/formatos`.
+
+### Upload e análise de arte
+
+```http
+POST /api/projetos/{projeto_id}/artes?canal=instagram_feed
+Content-Type: multipart/form-data
+X-Usuario: ana
+```
+
+Campo multipart obrigatório: `file`.
+
+A resposta inicial contém `status: "em_analise"`. A análise é executada em
+background; o frontend deve consultar `GET /api/artes/{arte_id}` em vez de
+assumir que ela terminou na resposta do upload.
+
+Estados possíveis da arte:
+
+```text
+em_analise
+em_producao
+precisa_ajustes
+aguardando_aprovacao
+aprovada
+```
+
+Estados possíveis da análise:
+
+```text
+concluida
+erro
+```
+
+### Achados e correções
+
+Os achados ficam em `analise.achados`. Cada achado pode conter:
+
+```json
+{
+  "id": 10,
+  "tipo": "erro_escrita",
+  "regiao": { "x": 10, "y": 20, "w": 100, "h": 30 },
+  "sugestao": {
+    "linha_original": "Texto incorreto",
+    "linha_corrigida": "Texto corrigido"
+  },
+  "decisao": "pendente"
+}
+```
+
+Para aceitar ou rejeitar sugestões:
+
+```http
+POST /api/artes/{arte_id}/correcoes
+Content-Type: application/json
+X-Usuario: ana
+```
+
+```json
+{
+  "aceitos": [10, 11],
+  "rejeitados": [12]
+}
+```
+
+Somente achados aceitos que tenham `sugestao.linha_corrigida` geram uma nova
+versão. A versão original nunca é sobrescrita.
+
+### Imagens e versões
+
+Use o campo `imagem_url` retornado pelo backend. Ele é relativo à mesma origem:
+
+```ts
+const url = `${apiBase}${arte.imagem_url}`;
+```
+
+Se `apiBase` for vazio e o navegador estiver usando o Nginx, basta usar:
+
+```tsx
+<img src={arte.imagem_url} alt={arte.nome} />
+```
+
+Não monte caminhos de arquivos do volume `/data` no frontend. Arquivos só devem
+ser acessados pelas rotas HTTP:
+
+```text
+GET /api/artes/{id}/versoes/{numero}/imagem
+GET /api/projetos/{id}/briefing
+GET /api/artes/{id}/exportar
+```
+
+### Aprovação
+
+Somente `rafael` pode aprovar ou devolver uma arte. O frontend deve esconder ou
+desabilitar os botões de decisão para designers, mas o backend continua sendo a
+autoridade e retorna `403` quando necessário.
+
+Antes da aprovação, a arte deve estar em `aguardando_aprovacao`. Depois de
+aprovada, a exportação fica liberada. Uma aprovação não deve ser simulada no
+frontend; sempre aguarde a resposta do backend.
+
+### Polling da análise
+
+Como a análise usa uma tarefa em background, o frontend pode consultar o detalhe
+com um intervalo curto, por exemplo 2 segundos, enquanto `status` for
+`em_analise`. Interrompa o polling quando o estado for `em_producao`,
+`precisa_ajustes` ou `erro`.
+
+Não faça polling infinito e não inicie uma nova análise apenas para atualizar a
+tela. O upload já dispara a análise automaticamente.
+
+### Erros
+
+Todas as respostas de erro de negócio usam:
+
+```json
+{
+  "detail": "Mensagem pronta para exibir"
+}
+```
+
+O frontend deve tratar pelo menos estes status:
+
+| Status | Significado |
+|---:|---|
+| `400` | Arquivo ou dados inválidos |
+| `401` | Usuário desconhecido |
+| `403` | Usuário sem permissão ou exportação ainda bloqueada |
+| `404` | Projeto, arte ou arquivo não encontrado |
+| `409` | Operação incompatível com o estado atual |
+| `413` | Arquivo acima do limite |
+| `415` | Tipo de arquivo não aceito |
+| `422` | Campo ou canal inválido |
+| `503`/`504` | Serviço auxiliar indisponível ou lento |
+
+### Proxy do Nginx
+
+O Nginx encaminha `/api` para o serviço `back-end` e `/` para o serviço
+`front-end`. O frontend não deve usar `localhost:3000` quando estiver sendo
+servido pelo Nginx em `http://localhost`; use `/api`.
+
+### Regra para mudanças de contrato
+
+Se o frontend precisar de um campo novo, primeiro confirme se ele já está no
+serializer correspondente. Não dependa de atributos internos do SQLAlchemy nem
+de caminhos do filesystem. Alterações de payload, status ou rota devem ser
+documentadas neste arquivo antes de serem consumidas pela interface.
 
 ### Usuários de demonstração
 
@@ -269,13 +583,13 @@ Erros sempre voltam como `{"detail": "mensagem pronta para exibir"}`.
 ## 8. Como estender
 
 **Adicionar uma nova conferência** (ex.: cor fora do padrão):
-1. Crie a regra em `services/analise.py` e adicione os achados com um novo `tipo`.
+1. Crie a regra em `app/services/analyses.py` e adicione os achados com um novo `tipo`.
 2. Inclua o nome em `verificacoes_aplicadas`.
 3. Se tiver correção automática, preencha `sugestao.linha_corrigida`.
 
-**Trocar o OCR:** implemente a interface `MotorOCR` em `services/ocr.py` (um método `ler(imagem)` que devolve linhas com texto e caixa) e ajuste `obter_motor()`.
+**Trocar o OCR:** implemente a interface `MotorOCR` em `app/services/ocr.py` (um método `ler(imagem)` que devolve linhas com texto e caixa) e ajuste `obter_motor()`.
 
-**Novo formato de publicação:** adicione em `services/formatos.py`.
+**Novo formato de publicação:** adicione em `app/services/formatos.py`.
 
 ---
 

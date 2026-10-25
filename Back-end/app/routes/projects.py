@@ -15,7 +15,7 @@ from app.db import get_db
 from app.deps import usuario_atual
 from app.models import Arte, EventoDecisao, Projeto
 from app.serializers import ser_formatos, ser_projeto_detalhe, ser_projeto_resumo
-from app.services import briefing, storage as armazenamento
+from app.services import armazenamento, briefing
 from app.services.erros import ErroNegocio
 from app.services.formatos import FORMATOS
 
