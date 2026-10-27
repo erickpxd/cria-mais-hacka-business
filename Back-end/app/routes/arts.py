@@ -1,23 +1,23 @@
 import io
 
-import cv2
-import numpy as np
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from fastapi.responses import FileResponse, StreamingResponse
 from PIL import Image, UnidentifiedImageError
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import get_db
-from app.deps import usuario_atual
-from app.models import Arte, Comentario, EventoDecisao, Projeto, VersaoArte, agora
-from app.serializers import ser_analise, ser_arte, ser_versao, versao_atual
-from app.services import adaptations, analyses, armazenamento, corrections
+from app.deps import exigir_criador, usuario_atual
+from app.domain import StatusArte, transicionar
+from app.models import Analise, Arte, Comentario, EventoDecisao, Projeto, VersaoArte, agora
+from app.serializers import ser_analise, ser_arte, ser_historico_arte, ser_versao, versao_atual
+from app.services import analyses, armazenamento, templates
+from app.services.briefing import parse_preco
 from app.services.erros import ErroNegocio
 from app.services.formatos import FORMATOS
 
-router = APIRouter(prefix="/api")
+router = APIRouter()
 
 
 def _arte(db: Session, arte_id: int) -> Arte:
@@ -38,6 +38,8 @@ async def _imagem(file: UploadFile) -> tuple[bytes, int, int, str]:
     try:
         with Image.open(io.BytesIO(conteudo)) as imagem:
             largura, altura = imagem.size
+            if largura * altura > settings.max_pixels_arte:
+                raise ErroNegocio(413, "A imagem excede o limite seguro de pixels.")
             imagem.verify()
     except (UnidentifiedImageError, OSError) as exc:
         raise ErroNegocio(400, "O arquivo não é uma imagem válida.") from exc
@@ -63,13 +65,12 @@ async def _criar_versao(
             nome=file.filename or "arte",
             canal=canal,
             criado_por=usuario["id"],
-            status="em_analise",
-            enviada_em=agora(),
+            status=StatusArte.EM_ANALISE.value,
         )
         db.add(arte)
         db.flush()
     else:
-        arte.status = "em_analise"
+        arte.status = transicionar(arte.status, StatusArte.EM_ANALISE)
     numero = max((v.numero for v in arte.versoes), default=0) + 1
     relativo = armazenamento.salvar(f"artes/{arte.id}", f"v{numero}{extensao}", conteudo)
     versao = VersaoArte(
@@ -82,8 +83,11 @@ async def _criar_versao(
         criado_por=usuario["id"],
     )
     db.add(versao)
+    db.flush()
+    db.add(Analise(versao_id=versao.id, estado="queued", verificacoes_aplicadas=[], notas=[]))
     db.commit()
     db.refresh(versao)
+    db.refresh(arte, attribute_names=["versoes"])
     background_tasks.add_task(analyses.executar_analise_em_background, versao.id)
     return arte
 
@@ -97,6 +101,7 @@ async def enviar(
     db: Session = Depends(get_db),
     usuario: dict = Depends(usuario_atual),
 ):
+    exigir_criador(usuario)
     projeto = db.get(Projeto, projeto_id)
     if not projeto:
         raise HTTPException(404, "Projeto não encontrado.")
@@ -112,6 +117,7 @@ async def nova_versao(
     db: Session = Depends(get_db),
     usuario: dict = Depends(usuario_atual),
 ):
+    exigir_criador(usuario)
     arte = _arte(db, arte_id)
     return ser_arte(await _criar_versao(
         arte.projeto, arte.canal, file, usuario, db, background_tasks, arte
@@ -129,6 +135,7 @@ def detalhe(
     resultado = ser_arte(arte)
     resultado["versoes"] = [ser_versao(v, v is atual) for v in arte.versoes]
     resultado["analise"] = ser_analise(atual.analise) if atual else None
+    resultado["historico"] = ser_historico_arte(arte)
     return resultado
 
 
@@ -141,6 +148,38 @@ def analise(
     arte = _arte(db, arte_id)
     atual = versao_atual(arte)
     return ser_analise(atual.analise) if atual else None
+
+
+@router.post("/artes/{arte_id}/analise", status_code=202)
+def iniciar_analise(
+    arte_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    usuario: dict = Depends(usuario_atual),
+):
+    """Agenda a conferência real da versão atual, inclusive para templates antigos."""
+    arte = _arte(db, arte_id)
+    atual = versao_atual(arte)
+    if not atual:
+        raise ErroNegocio(409, "A arte ainda não possui uma versão para analisar.")
+    if atual.analise and atual.analise.estado in ("queued", "processing"):
+        return ser_analise(atual.analise)
+    if atual.analise is None:
+        db.add(Analise(
+            versao_id=atual.id,
+            estado="queued",
+            verificacoes_aplicadas=[],
+            notas=[],
+        ))
+    else:
+        atual.analise.estado = "queued"
+        atual.analise.erro = None
+        atual.analise.verificacoes_aplicadas = []
+        atual.analise.notas = []
+    db.commit()
+    db.refresh(atual)
+    background_tasks.add_task(analyses.executar_analise_em_background, atual.id)
+    return ser_analise(atual.analise)
 
 
 @router.get("/artes/{arte_id}/versoes/{numero}/imagem")
@@ -162,7 +201,7 @@ class CorrecoesIn(BaseModel):
     rejeitados: list[int] = Field(default_factory=list)
 
 
-@router.post("/artes/{arte_id}/correcoes", status_code=201)
+@router.post("/artes/{arte_id}/correcoes", status_code=501)
 def aplicar_correcoes(
     arte_id: int,
     corpo: CorrecoesIn,
@@ -170,49 +209,7 @@ def aplicar_correcoes(
     db: Session = Depends(get_db),
     usuario: dict = Depends(usuario_atual),
 ):
-    arte = _arte(db, arte_id)
-    atual = versao_atual(arte)
-    if not atual or not atual.analise:
-        raise ErroNegocio(409, "A arte ainda não possui uma análise.")
-    achados = {a.id: a for a in atual.analise.achados}
-    selecionados = [achados.get(item_id) for item_id in corpo.aceitos]
-    selecionados = [a for a in selecionados if a and a.sugestao and a.sugestao.get("linha_corrigida")]
-    for achado_id in corpo.aceitos:
-        if achado_id in achados:
-            achados[achado_id].decisao = "aceito"
-            achados[achado_id].decidido_por = usuario["id"]
-            achados[achado_id].decidido_em = agora()
-    for achado_id in corpo.rejeitados:
-        if achado_id in achados:
-            achados[achado_id].decisao = "rejeitado"
-            achados[achado_id].decidido_por = usuario["id"]
-            achados[achado_id].decidido_em = agora()
-    if not selecionados:
-        db.commit()
-        return ser_arte(arte)
-    imagem_bgr = cv2.imdecode(
-        np.frombuffer(armazenamento.ler(atual.arquivo), np.uint8), cv2.IMREAD_COLOR
-    )
-    if imagem_bgr is None:
-        raise ErroNegocio(400, "Não foi possível abrir a imagem da arte.")
-    itens = [(a.regiao, a.sugestao["linha_corrigida"]) for a in selecionados if a.regiao]
-    corrigida = corrections.aplicar_correcoes(imagem_bgr, itens)
-    ok, png = cv2.imencode(".png", corrigida)
-    if not ok:
-        raise ErroNegocio(500, "Não foi possível gerar a versão corrigida.")
-    numero = max(v.numero for v in arte.versoes) + 1
-    relativo = armazenamento.salvar(f"artes/{arte.id}", f"v{numero}.png", png.tobytes())
-    versao = VersaoArte(
-        arte_id=arte.id, numero=numero, arquivo=relativo,
-        largura=atual.largura, altura=atual.altura, origem="correcao",
-        nota="Correções aceitas aplicadas.", criado_por=usuario["id"],
-    )
-    arte.status = "em_analise"
-    db.add(versao)
-    db.commit()
-    db.refresh(versao)
-    background_tasks.add_task(analyses.executar_analise_em_background, versao.id)
-    return ser_arte(arte)
+    raise ErroNegocio(501, "Correção automática de PNG/JPG não é suportada. Use um template editável.")
 
 
 @router.post("/artes/{arte_id}/enviar-aprovacao")
@@ -221,10 +218,11 @@ def enviar_aprovacao(
     db: Session = Depends(get_db),
     usuario: dict = Depends(usuario_atual),
 ):
+    exigir_criador(usuario)
     arte = _arte(db, arte_id)
-    if arte.status not in ("em_producao", "precisa_ajustes"):
+    if arte.status not in (StatusArte.EM_PRODUCAO.value, StatusArte.PRECISA_DE_AJUSTES.value):
         raise ErroNegocio(409, "A arte ainda não pode ser enviada para aprovação.")
-    arte.status = "aguardando_aprovacao"
+    arte.status = transicionar(arte.status, StatusArte.AGUARDANDO_APROVACAO)
     arte.enviada_em = agora()
     db.add(EventoDecisao(tipo="arte_enviada_aprovacao", usuario=usuario["id"],
                          payload={"arte_id": arte.id, "versao": versao_atual(arte).numero}))
@@ -236,7 +234,7 @@ class AdaptarIn(BaseModel):
     canal: str
 
 
-@router.post("/artes/{arte_id}/adaptar", status_code=201)
+@router.post("/artes/{arte_id}/adaptar", status_code=501)
 async def adaptar(
     arte_id: int,
     corpo: AdaptarIn,
@@ -244,30 +242,77 @@ async def adaptar(
     db: Session = Depends(get_db),
     usuario: dict = Depends(usuario_atual),
 ):
-    arte = _arte(db, arte_id)
-    if corpo.canal not in FORMATOS:
-        raise ErroNegocio(422, f"Canal desconhecido: {corpo.canal}")
+    raise ErroNegocio(501, "Adaptação confiável exige template editável e ainda não está disponível.")
+
+
+class TemplateDadosIn(BaseModel):
+    produto: str = Field(min_length=1, max_length=300)
+    preco: str | None = None
+    objetivo: str = Field(default="", max_length=1000)
+    informacoes_obrigatorias: str = Field(default="", max_length=2000)
+
+
+def _dados_template(corpo: TemplateDadosIn) -> dict:
+    preco = parse_preco(corpo.preco)
+    if corpo.preco and preco is None:
+        raise ErroNegocio(422, "Preço inválido. Use o formato 17,90.")
+    return {"produto": corpo.produto.strip(), "preco_centavos": preco,
+            "objetivo": corpo.objetivo.strip(),
+            "informacoes_obrigatorias": corpo.informacoes_obrigatorias.strip()}
+
+
+def _template_editavel(arte: Arte) -> VersaoArte:
     atual = versao_atual(arte)
-    if not atual:
-        raise ErroNegocio(409, "A arte não possui uma versão para adaptar.")
-    conteudo, nota = await adaptations.adaptar(armazenamento.ler(atual.arquivo), corpo.canal)
-    nova = Arte(
-        projeto_id=arte.projeto_id, nome=arte.nome, canal=corpo.canal,
-        status="em_analise", arte_origem_id=arte.id, criado_por=usuario["id"],
-    )
-    db.add(nova)
-    db.flush()
-    relativo = armazenamento.salvar(f"artes/{nova.id}", "v1.png", conteudo)
-    formato = FORMATOS[corpo.canal]
-    versao = VersaoArte(
-        arte_id=nova.id, numero=1, arquivo=relativo, largura=formato["largura"],
-        altura=formato["altura"], origem="adaptacao", nota=nota, criado_por=usuario["id"],
-    )
-    db.add(versao)
+    if not atual or not atual.template_dados:
+        raise ErroNegocio(409, "Esta arte não foi criada por um template editável.")
+    return atual
+
+
+@router.post("/artes/{arte_id}/template/preview")
+def preview_template(
+    arte_id: int,
+    corpo: TemplateDadosIn,
+    db: Session = Depends(get_db),
+    usuario: dict = Depends(usuario_atual),
+):
+    exigir_criador(usuario)
+    arte = _arte(db, arte_id)
+    _template_editavel(arte)
+    png = templates.renderizar(arte.projeto, arte.canal, _dados_template(corpo))
+    return StreamingResponse(io.BytesIO(png), media_type="image/png",
+                             headers={"Cache-Control": "no-store"})
+
+
+@router.post("/artes/{arte_id}/template/versoes", status_code=201)
+def salvar_template(
+    arte_id: int,
+    corpo: TemplateDadosIn,
+    db: Session = Depends(get_db),
+    usuario: dict = Depends(usuario_atual),
+):
+    exigir_criador(usuario)
+    arte = _arte(db, arte_id)
+    atual = _template_editavel(arte)
+    if arte.status == StatusArte.AGUARDANDO_APROVACAO.value:
+        raise ErroNegocio(409, "Retire a arte da revisão antes de editar o template.")
+    dados = _dados_template(corpo)
+    png = templates.renderizar(arte.projeto, arte.canal, dados)
+    numero = atual.numero + 1
+    caminho = armazenamento.salvar(f"artes/{arte.id}", f"v{numero}.png", png)
+    db.add(VersaoArte(
+        arte_id=arte.id, numero=numero, arquivo=caminho,
+        largura=atual.largura, altura=atual.altura, origem="template",
+        nota="Campos editáveis atualizados pelo criador.", template_dados=dados,
+        criado_por=usuario["id"],
+    ))
+    if arte.status in (StatusArte.APROVADA.value, StatusArte.PRECISA_DE_AJUSTES.value):
+        arte.status = transicionar(arte.status, StatusArte.EM_ANALISE)
+        arte.status = transicionar(arte.status, StatusArte.EM_PRODUCAO)
+    db.add(EventoDecisao(tipo="template_editado", usuario=usuario["id"],
+                         payload={"arte_id": arte.id, "versao": numero}))
     db.commit()
-    db.refresh(versao)
-    background_tasks.add_task(analyses.executar_analise_em_background, versao.id)
-    return ser_arte(nova)
+    db.refresh(arte, attribute_names=["versoes"])
+    return ser_arte(arte)
 
 
 class ComentarioIn(BaseModel):

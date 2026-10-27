@@ -35,6 +35,8 @@ class MotorPaddle:
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
             use_textline_orientation=False,
+            # Evita uma incompatibilidade conhecida do executor oneDNN em CPU.
+            enable_mkldnn=False,
         )
 
     def ler(self, img_bgr: np.ndarray) -> list[LinhaTexto]:

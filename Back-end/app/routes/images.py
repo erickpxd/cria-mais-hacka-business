@@ -6,10 +6,11 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from app.config import settings
 from app.schemas import ResultadoAnalise
-from app.services import technician as tecnico, vision as visao
+from app.services import technician as tecnico
+from app.services import vision as visao
 
 log = logging.getLogger(__name__)
-router = APIRouter(prefix="/api")
+router = APIRouter()
 
 
 async def _ler_upload(file: UploadFile) -> bytes:

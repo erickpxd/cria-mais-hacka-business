@@ -1,4 +1,3 @@
-import asyncio
 import base64
 import io
 import logging
@@ -6,8 +5,9 @@ import math
 
 import httpx
 import numpy as np
-
 from PIL import Image, ImageOps, UnidentifiedImageError
+
+from app.config import settings
 
 log = logging.getLogger(__name__)
 

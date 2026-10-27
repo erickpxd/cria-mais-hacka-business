@@ -6,8 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import settings
-from app.db import init_db
-from app.routes import approvals, arts, images, projects
+from app.routes import approvals, arts, projects
 from app.services.erros import ErroNegocio
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -15,7 +14,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
     yield
 
 
@@ -34,18 +32,16 @@ async def tratar_erro_negocio(_: Request, exc: ErroNegocio):
     return JSONResponse(status_code=exc.status, content={"detail": exc.mensagem})
 
 
-app.include_router(projects.router)
-app.include_router(arts.router)
-app.include_router(images.router)
-app.include_router(approvals.router)
+for router in (projects.router, arts.router, approvals.router):
+    app.include_router(router, prefix="/api/v1")
 
 
-@app.get("/api")
+@app.get("/health")
 def raiz():
-    return {"status": "ok"}
+    return {"status": "ok", "service": "cria-mais-api"}
 
 
-@app.get("/api/saude")
+@app.get("/api/v1/health/dependencies")
 async def saude():
     """Diz quais serviços de apoio estão no ar (nenhum deles derruba a API)."""
     import httpx

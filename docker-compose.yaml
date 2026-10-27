@@ -8,11 +8,12 @@ services:
       context: ./Back-end
       dockerfile: Dockerfile
     # Uvicorn inicia o módulo explicitamente; o watch sincroniza o código.
-    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "80"]
+    command: ["sh", "-c", "alembic upgrade head && python -m app.seed_demo && python -m uvicorn app.main:app --host 0.0.0.0 --port 80"]
     environment:
       - DATABASE_URL=sqlite:////data/cria_mais.db
       - DATA_DIR=/data
       - OCR_MOTOR=paddle
+      - OCR_LANG=pt
       - LANGUAGETOOL_URL=http://languagetool:8010
       # Outpainting é OPCIONAL: ligue com OUTPAINTING_ATIVO=true no .env
       # e suba com: docker compose --profile outpainting up -d --build

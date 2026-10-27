@@ -1,10 +1,13 @@
 fastapi[standard]
 pydantic-settings
 sqlalchemy>=2
+psycopg[binary]>=3.2
+alembic>=1.13
 httpx
 pillow
 numpy
 opencv-python-headless
 pypdf
+pypdfium2
 python-docx
 ollama

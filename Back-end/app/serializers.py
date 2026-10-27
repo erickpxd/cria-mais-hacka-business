@@ -7,11 +7,13 @@ from app.services.formatos import FORMATOS, nome_canal
 STATUS_ROTULO = {
     "em_analise": "Em análise",
     "em_producao": "Em produção",
-    "precisa_ajustes": "Precisa de ajustes",
+    "precisa_de_ajustes": "Precisa de ajustes",
     "aguardando_aprovacao": "Aguardando aprovação",
     "aprovada": "Aprovada",
 }
-ORIGEM_ROTULO = {"upload": "Enviada", "correcao": "Correções aplicadas", "adaptacao": "Adaptada"}
+ORIGEM_ROTULO = {"upload": "Enviada", "template": "Gerada por template",
+                 "demo": "Arte de demonstração",
+                 "correcao": "Correções aplicadas", "adaptacao": "Adaptada"}
 
 
 def iso(dt):
@@ -28,6 +30,7 @@ def versao_atual(arte: Arte):
 
 def ser_arte(arte: Arte) -> dict:
     v = versao_atual(arte)
+    ultima_revisao = arte.aprovacoes[-1] if arte.aprovacoes else None
     return {
         "id": arte.id, "projeto_id": arte.projeto_id, "nome": arte.nome,
         "canal": arte.canal, "canal_nome": nome_canal(arte.canal),
@@ -38,7 +41,13 @@ def ser_arte(arte: Arte) -> dict:
         "enviada_em": iso(arte.enviada_em),
         "versao_atual": v.numero if v else None,
         "dimensoes": f"{v.largura} × {v.altura}" if v else None,
-        "imagem_url": f"/api/artes/{arte.id}/versoes/{v.numero}/imagem" if v else None,
+        "imagem_url": f"/api/v1/artes/{arte.id}/versoes/{v.numero}/imagem" if v else None,
+        "template_editavel": bool(v and v.template_dados),
+        "template_dados": v.template_dados if v else None,
+        "ultima_revisao": ({"decisao": ultima_revisao.decisao,
+                             "comentario": ultima_revisao.comentario,
+                             "versao": ultima_revisao.versao_numero,
+                             "em": iso(ultima_revisao.em)} if ultima_revisao else None),
     }
 
 
@@ -46,13 +55,17 @@ def ser_versao(v, atual: bool) -> dict:
     return {"numero": v.numero, "origem": v.origem, "origem_rotulo": ORIGEM_ROTULO.get(v.origem, v.origem),
             "nota": v.nota, "criado_por": nome_usuario(v.criado_por), "criado_em": iso(v.criado_em),
             "largura": v.largura, "altura": v.altura, "atual": atual, "original": v.numero == 1,
-            "imagem_url": f"/api/artes/{v.arte_id}/versoes/{v.numero}/imagem"}
+            "imagem_url": f"/api/v1/artes/{v.arte_id}/versoes/{v.numero}/imagem",
+            "template_editavel": bool(v.template_dados), "template_dados": v.template_dados}
 
 
 def ser_achado(a: Achado) -> dict:
+    confianca = (a.sugestao or {}).get("confianca")
     return {"id": a.id, "ordem": a.ordem + 1, "tipo": a.tipo, "titulo": a.titulo, "descricao": a.descricao,
             "regiao": a.regiao, "sugestao": a.sugestao, "referencia": a.referencia,
-            "corrigivel": bool(a.sugestao and a.sugestao.get("linha_corrigida")),
+            "observado": (a.sugestao or {}).get("de"), "esperado": (a.sugestao or {}).get("para"),
+            "confianca": confianca, "status": "confirmed" if confianca is None or confianca >= 0.8 else "uncertain",
+            "correcao_suportada": False, "corrigivel": False,
             "decisao": a.decisao, "decidido_por": nome_usuario(a.decidido_por) if a.decidido_por else None}
 
 
@@ -62,12 +75,15 @@ def ser_analise(an: Analise | None) -> dict | None:
     pendentes = [a for a in an.achados if a.decisao == "pendente"]
     return {
         "estado": an.estado, "erro": an.erro,
+        "engine_version": an.engine_version, "iniciada_em": iso(an.iniciada_em),
+        "finalizada_em": iso(an.finalizada_em),
         "verificacoes_aplicadas": an.verificacoes_aplicadas, "notas": an.notas,
         "achados": [ser_achado(a) for a in an.achados],
         "total_achados": len(an.achados), "total_pendentes": len(pendentes),
-        "sem_inconsistencias": an.estado == "concluida" and not an.achados,
+        "sem_inconsistencias": an.estado in ("completed", "concluida") and not an.achados,
         "aviso": ("Nenhuma inconsistência detectada. Isso não garante que a arte esteja livre de erros: "
-                  "revise o conteúdo e a legibilidade antes de enviar." if an.estado == "concluida" and not an.achados
+                  "revise o conteúdo e a legibilidade antes de enviar."
+                  if an.estado in ("completed", "concluida") and not an.achados
                   else "As sugestões precisam da avaliação de uma pessoa."),
     }
 
@@ -76,6 +92,26 @@ def ser_comentario(c: Comentario, numero: int) -> dict:
     return {"id": c.id, "numero": numero, "autor": nome_usuario(c.autor), "texto": c.texto,
             "regiao": c.regiao, "versao": c.versao_numero, "criado_em": iso(c.criado_em),
             "origem": "revisão humana"}
+
+
+def ser_historico_arte(arte: Arte) -> list[dict]:
+    itens = []
+    for versao in arte.versoes:
+        itens.append({"id": f"versao-{versao.id}", "em": iso(versao.criado_em),
+                      "ator": nome_usuario(versao.criado_por), "papel": "criador",
+                      "acao": f"Versão {versao.numero} criada ({ORIGEM_ROTULO.get(versao.origem, versao.origem)}).",
+                      "comentario": versao.nota})
+    if arte.enviada_em:
+        itens.append({"id": f"envio-{arte.id}", "em": iso(arte.enviada_em),
+                      "ator": nome_usuario(arte.criado_por), "papel": "criador",
+                      "acao": "Arte enviada para aprovação.", "comentario": None})
+    for aprovacao in arte.aprovacoes:
+        itens.append({"id": f"decisao-{aprovacao.id}", "em": iso(aprovacao.em),
+                      "ator": nome_usuario(aprovacao.revisor), "papel": "revisor",
+                      "acao": ("Arte aprovada." if aprovacao.decisao == "aprovada"
+                               else "Ajustes solicitados."),
+                      "comentario": aprovacao.comentario})
+    return sorted(itens, key=lambda item: item["em"] or "", reverse=True)
 
 
 def resumo_formatos(projeto: Projeto) -> dict:
@@ -91,7 +127,7 @@ def resumo_formatos(projeto: Projeto) -> dict:
 
 def ser_projeto_resumo(p: Projeto) -> dict:
     f = resumo_formatos(p)
-    ajustes = sum(1 for a in p.artes if a.status == "precisa_ajustes")
+    ajustes = sum(1 for a in p.artes if a.status == "precisa_de_ajustes")
     aguardando = sum(1 for a in p.artes if a.status == "aguardando_aprovacao")
     if p.artes and all(a.status == "aprovada" for a in p.artes) and not f["faltantes"]:
         status = ("concluido", "Concluído")
@@ -105,7 +141,7 @@ def ser_projeto_resumo(p: Projeto) -> dict:
         "total_artes": len(p.artes), "artes_com_ajustes": ajustes, "artes_aguardando": aguardando,
         "formatos": f, "prazo": p.prazo.isoformat() if p.prazo else None,
         "criado_por": nome_usuario(p.criado_por), "atualizado_em": iso(p.atualizado_em),
-        "capa_url": f"/api/artes/{capa.id}/versoes/1/imagem" if capa else None,
+        "capa_url": f"/api/v1/artes/{capa.id}/versoes/1/imagem" if capa else None,
     }
 
 
@@ -117,7 +153,7 @@ def ser_projeto_detalhe(p: Projeto) -> dict:
         "informacoes_obrigatorias": p.informacoes_obrigatorias, "orientacoes": p.orientacoes,
         "canais": [{"canal": c, "nome": nome_canal(c)} for c in p.canais or []],
         "tem_briefing": bool(p.briefing_arquivo), "briefing_nome": p.briefing_nome,
-        "briefing_url": f"/api/projetos/{p.id}/briefing" if p.briefing_arquivo else None,
+        "briefing_url": f"/api/v1/projetos/{p.id}/briefing" if p.briefing_arquivo else None,
         "artes": [ser_arte(a) for a in p.artes],
         "alertas": [f"Falta uma versão para {x['nome']}." for x in d["formatos"]["faltantes"]],
     })

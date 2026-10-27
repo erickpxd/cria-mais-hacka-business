@@ -1,6 +1,6 @@
 from datetime import date, datetime, timezone
 
-from sqlalchemy import JSON, Date, DateTime, ForeignKey, String, Text
+from sqlalchemy import JSON, Date, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -42,7 +42,7 @@ class Arte(Base):
     projeto_id: Mapped[int] = mapped_column(ForeignKey("projetos.id"))
     nome: Mapped[str] = mapped_column(String(200))
     canal: Mapped[str] = mapped_column(String(50))
-    # em_analise | em_producao | precisa_ajustes | aguardando_aprovacao | aprovada
+    # em_analise | em_producao | precisa_de_ajustes | aguardando_aprovacao | aprovada
     status: Mapped[str] = mapped_column(String(30), default="em_analise")
     # pronta | gerando | erro   (usado nas artes criadas por adaptação)
     geracao: Mapped[str] = mapped_column(String(20), default="pronta")
@@ -59,6 +59,9 @@ class Arte(Base):
     comentarios: Mapped[list["Comentario"]] = relationship(
         back_populates="arte", cascade="all, delete-orphan", order_by="Comentario.id"
     )
+    aprovacoes: Mapped[list["Aprovacao"]] = relationship(
+        back_populates="arte", cascade="all, delete-orphan", order_by="Aprovacao.id"
+    )
 
 
 class VersaoArte(Base):
@@ -74,6 +77,7 @@ class VersaoArte(Base):
     altura: Mapped[int]
     origem: Mapped[str] = mapped_column(String(20))  # upload | correcao | adaptacao
     nota: Mapped[str | None] = mapped_column(Text, default=None)
+    template_dados: Mapped[dict | None] = mapped_column(JSON, default=None)
     criado_por: Mapped[str] = mapped_column(String(50))
     criado_em: Mapped[datetime] = mapped_column(default=agora)
 
@@ -88,11 +92,14 @@ class Analise(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     versao_id: Mapped[int] = mapped_column(ForeignKey("versoes_arte.id"), unique=True)
-    estado: Mapped[str] = mapped_column(String(20), default="concluida")  # concluida | erro
+    estado: Mapped[str] = mapped_column(String(20), default="queued")  # queued|processing|completed|failed
     erro: Mapped[str | None] = mapped_column(Text, default=None)
     verificacoes_aplicadas: Mapped[list] = mapped_column(JSON, default=list)
     notas: Mapped[list] = mapped_column(JSON, default=list)
     linhas_ocr: Mapped[list] = mapped_column(JSON, default=list)
+    engine_version: Mapped[str] = mapped_column(String(80), default="paddleocr-local")
+    iniciada_em: Mapped[datetime | None] = mapped_column(default=None)
+    finalizada_em: Mapped[datetime | None] = mapped_column(default=None)
     executada_em: Mapped[datetime] = mapped_column(default=agora)
 
     versao: Mapped[VersaoArte] = relationship(back_populates="analise")
@@ -142,6 +149,8 @@ class Aprovacao(Base):
     revisor: Mapped[str] = mapped_column(String(50))
     comentario: Mapped[str | None] = mapped_column(Text, default=None)
     em: Mapped[datetime] = mapped_column(default=agora)
+
+    arte: Mapped[Arte] = relationship(back_populates="aprovacoes")
 
 
 class EventoDecisao(Base):

@@ -6,13 +6,14 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.deps import exigir_revisor, usuario_atual
+from app.domain import StatusArte, transicionar
 from app.models import Aprovacao, Arte, EventoDecisao, agora
-from app.serializers import (iso, nome_usuario, ser_analise, ser_arte, ser_comentario, ser_versao, versao_atual)
+from app.serializers import iso, nome_usuario, ser_analise, ser_arte, ser_comentario, ser_versao, versao_atual
 from app.services import armazenamento
 from app.services.erros import ErroNegocio
 from app.services.formatos import nome_canal
 
-router = APIRouter(prefix="/api")
+router = APIRouter()
 
 AVISO_APROVACAO = "A aprovação foi feita por uma pessoa. Não representa garantia de conformidade legal ou regulatória."
 AVISO_AUTOMATICO = "A legibilidade e o contexto dependem da sua avaliação."
@@ -39,11 +40,11 @@ def listar(aba: str = "pendentes", campanha: int | None = None, canal: str | Non
     itens = []
     for a in artes:
         ult = _ultima_decisao(db, a.id)
-        if aba == "pendentes" and a.status != "aguardando_aprovacao":
+        if aba == "pendentes" and a.status != StatusArte.AGUARDANDO_APROVACAO.value:
             continue
-        if aba == "aprovadas" and a.status != "aprovada":
+        if aba == "aprovadas" and a.status != StatusArte.APROVADA.value:
             continue
-        if aba == "devolvidas" and not (a.status == "precisa_ajustes" and ult and ult.decisao == "devolvida"):
+        if aba == "devolvidas" and not (a.status == StatusArte.PRECISA_DE_AJUSTES.value and ult and ult.decisao == "devolvida"):
             continue
         if campanha and a.projeto_id != campanha:
             continue
@@ -56,11 +57,11 @@ def listar(aba: str = "pendentes", campanha: int | None = None, canal: str | Non
     contagem = {k: 0 for k in ("pendentes", "aprovadas", "devolvidas")}
     for a in artes:
         ult = _ultima_decisao(db, a.id)
-        if a.status == "aguardando_aprovacao":
+        if a.status == StatusArte.AGUARDANDO_APROVACAO.value:
             contagem["pendentes"] += 1
-        elif a.status == "aprovada":
+        elif a.status == StatusArte.APROVADA.value:
             contagem["aprovadas"] += 1
-        elif a.status == "precisa_ajustes" and ult and ult.decisao == "devolvida":
+        elif a.status == StatusArte.PRECISA_DE_AJUSTES.value and ult and ult.decisao == "devolvida":
             contagem["devolvidas"] += 1
     return {"aba": aba, "contagem": contagem, "total_exibido": len(itens), "itens": itens,
             "aviso": "Confira a arte, o briefing e o histórico. As verificações automáticas apoiam a revisão, mas a decisão é da equipe."}
@@ -77,7 +78,7 @@ def avaliar(arte_id: int, db: Session = Depends(get_db), usuario: dict = Depends
     d.update({
         "projeto_nome": a.projeto.nome, "canal_nome": nome_canal(a.canal),
         "breadcrumb": f"{a.nome} / {a.projeto.nome} / {nome_canal(a.canal)}",
-        "verificacoes": {"concluidas": bool(an and an["estado"] == "concluida"),
+        "verificacoes": {"concluidas": bool(an and an["estado"] in ("completed", "concluida")),
                          "aplicadas": an["verificacoes_aplicadas"] if an else [],
                          "notas": an["notas"] if an else [], "aviso": AVISO_AUTOMATICO,
                          "achados_pendentes": an["total_pendentes"] if an else 0},
@@ -86,10 +87,10 @@ def avaliar(arte_id: int, db: Session = Depends(get_db), usuario: dict = Depends
         "decisao": ({"decisao": ult.decisao, "revisor": nome_usuario(ult.revisor), "em": iso(ult.em),
                      "versao": ult.versao_numero, "comentario": ult.comentario,
                      "aviso": AVISO_APROVACAO if ult.decisao == "aprovada" else None} if ult else None),
-        "pode_decidir": usuario["papel"] == "revisor" and a.status == "aguardando_aprovacao",
-        "exportacao_liberada": a.status == "aprovada",
+        "pode_decidir": usuario["papel"] == "revisor" and a.status == StatusArte.AGUARDANDO_APROVACAO.value,
+        "exportacao_liberada": a.status == StatusArte.APROVADA.value,
         "tem_briefing": bool(a.projeto.briefing_arquivo),
-        "briefing_url": f"/api/projetos/{a.projeto_id}/briefing" if a.projeto.briefing_arquivo else None,
+        "briefing_url": f"/api/v1/projetos/{a.projeto_id}/briefing" if a.projeto.briefing_arquivo else None,
     })
     return d
 
@@ -99,7 +100,7 @@ class AjustesIn(BaseModel):
 
 
 def _precisa_aguardando(a: Arte) -> None:
-    if a.status != "aguardando_aprovacao":
+    if a.status != StatusArte.AGUARDANDO_APROVACAO.value:
         raise ErroNegocio(409, "Esta arte não está aguardando aprovação.")
 
 
@@ -113,11 +114,11 @@ def aprovar(arte_id: int, db: Session = Depends(get_db), usuario: dict = Depends
     v = versao_atual(a)
     db.add(Aprovacao(arte_id=a.id, versao_numero=v.numero, decisao="aprovada", revisor=usuario["id"]))
     db.add(EventoDecisao(tipo="arte_aprovada", usuario=usuario["id"], payload={"arte_id": a.id, "versao": v.numero}))
-    a.status = "aprovada"
+    a.status = transicionar(a.status, StatusArte.APROVADA)
     db.commit()
     return {"mensagem": "Aprovação registrada.", "aviso": AVISO_APROVACAO,
             "aprovada_por": usuario["nome"], "versao": v.numero, "em": iso(agora()),
-            "exportar_url": f"/api/artes/{a.id}/exportar"}
+            "exportar_url": f"/api/v1/artes/{a.id}/exportar"}
 
 
 @router.post("/artes/{arte_id}/solicitar-ajustes")
@@ -133,7 +134,7 @@ def solicitar_ajustes(arte_id: int, corpo: AjustesIn, db: Session = Depends(get_
                      comentario=corpo.comentario.strip()))
     db.add(EventoDecisao(tipo="arte_devolvida", usuario=usuario["id"],
                          payload={"arte_id": a.id, "versao": v.numero, "regioes": len(a.comentarios)}))
-    a.status = "precisa_ajustes"
+    a.status = transicionar(a.status, StatusArte.PRECISA_DE_AJUSTES)
     db.commit()
     return {"mensagem": f"Arte devolvida para {nome_usuario(a.criado_por)}.", "regioes": len(a.comentarios)}
 
@@ -143,7 +144,7 @@ def exportar(arte_id: int, db: Session = Depends(get_db), usuario: dict = Depend
     """Só exporta depois da aprovação HUMANA, e exporta exatamente a versão aprovada."""
     a = _arte(db, arte_id)
     ult = _ultima_decisao(db, a.id)
-    if a.status != "aprovada" or not ult or ult.decisao != "aprovada":
+    if a.status != StatusArte.APROVADA.value or not ult or ult.decisao != "aprovada":
         raise HTTPException(403, "Exportação disponível após a aprovação humana.")
     v = next(x for x in a.versoes if x.numero == ult.versao_numero)
     db.add(EventoDecisao(tipo="arte_exportada", usuario=usuario["id"], payload={"arte_id": a.id, "versao": v.numero}))

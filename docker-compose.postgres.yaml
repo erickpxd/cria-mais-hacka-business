@@ -1,0 +1,26 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: cria_mais
+      POSTGRES_USER: cria_mais
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cria_mais_local}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cria_mais -d cria_mais"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - app-networks
+
+  back-end:
+    environment:
+      DATABASE_URL: postgresql+psycopg://cria_mais:${POSTGRES_PASSWORD:-cria_mais_local}@postgres:5432/cria_mais
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres-data:

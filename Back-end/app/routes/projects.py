@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 import shutil
@@ -12,14 +13,14 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import get_db
-from app.deps import usuario_atual
-from app.models import Arte, EventoDecisao, Projeto
-from app.serializers import ser_formatos, ser_projeto_detalhe, ser_projeto_resumo
-from app.services import armazenamento, briefing
+from app.deps import exigir_criador, usuario_atual
+from app.models import Arte, EventoDecisao, Projeto, VersaoArte
+from app.serializers import ser_arte, ser_formatos, ser_projeto_detalhe, ser_projeto_resumo
+from app.services import armazenamento, briefing, templates
 from app.services.erros import ErroNegocio
 from app.services.formatos import FORMATOS
 
-router = APIRouter(prefix="/api")
+router = APIRouter()
 TOKEN = re.compile(r"^[0-9a-f]{32}$")
 
 
@@ -32,7 +33,7 @@ class ProjetoIn(BaseModel):
     preco: str | None = None            # "R$ 17,90" ou "17,90"
     informacoes_obrigatorias: str | None = None
     orientacoes: str | None = None
-    canais: list[str] = []
+    canais: list[str] = Field(default_factory=list)
     briefing_token: str | None = None   # vem de /api/briefings/extrair
 
 
@@ -82,6 +83,7 @@ def detalhe(projeto_id: int, status: str | None = None, canal: str | None = None
 
 @router.post("/briefings/extrair")
 async def extrair_briefing(file: UploadFile = File(...), usuario: dict = Depends(usuario_atual)):
+    exigir_criador(usuario)
     nome = file.filename or "briefing"
     ext = "." + nome.rsplit(".", 1)[-1].lower() if "." in nome else ""
     if ext not in settings.extensoes_briefing:
@@ -93,7 +95,7 @@ async def extrair_briefing(file: UploadFile = File(...), usuario: dict = Depends
     if not conteudo:
         raise ErroNegocio(400, "O arquivo está vazio.")
 
-    paginas, paginado = briefing.ler_paginas(nome, conteudo)
+    paginas, paginado = await asyncio.to_thread(briefing.ler_paginas, nome, conteudo)
     campos = briefing.extrair_campos(paginas, paginado)
     avisos = briefing.avisos_do_briefing(campos, paginas)
 
@@ -107,6 +109,7 @@ async def extrair_briefing(file: UploadFile = File(...), usuario: dict = Depends
 
 @router.post("/projetos", status_code=201)
 def criar(corpo: ProjetoIn, db: Session = Depends(get_db), usuario: dict = Depends(usuario_atual)):
+    exigir_criador(usuario)
     invalidos = [c for c in corpo.canais if c not in FORMATOS]
     if invalidos:
         raise ErroNegocio(422, f"Canais desconhecidos: {', '.join(invalidos)}")
@@ -140,6 +143,67 @@ def criar(corpo: ProjetoIn, db: Session = Depends(get_db), usuario: dict = Depen
                          payload={"projeto_id": p.id, "via_briefing": bool(corpo.briefing_token)}))
     db.commit()
     return ser_projeto_detalhe(p)
+
+
+class TemplatesIn(BaseModel):
+    canais: list[str] = Field(default_factory=list)
+
+
+@router.post("/projetos/{projeto_id}/templates", status_code=201)
+def gerar_templates(
+    projeto_id: int,
+    corpo: TemplatesIn,
+    db: Session = Depends(get_db),
+    usuario: dict = Depends(usuario_atual),
+):
+    """Gera peças reais usando somente campos confirmados do briefing manual."""
+    exigir_criador(usuario)
+    projeto = db.get(Projeto, projeto_id)
+    if not projeto:
+        raise HTTPException(404, "Projeto não encontrado.")
+    canais = corpo.canais or list(projeto.canais or [])
+    canais = list(dict.fromkeys(canais))
+    invalidos = [canal for canal in canais if canal not in FORMATOS]
+    if invalidos:
+        raise ErroNegocio(422, f"Canais desconhecidos: {', '.join(invalidos)}")
+    if not canais:
+        raise ErroNegocio(422, "Selecione ao menos um canal para gerar o template.")
+    criadas = []
+    for canal in canais:
+        formato = FORMATOS[canal]
+        arte = Arte(
+            projeto_id=projeto.id,
+            nome=f"{projeto.nome} — {formato['nome']}",
+            canal=canal,
+            status="em_producao",
+            criado_por=usuario["id"],
+        )
+        db.add(arte)
+        db.flush()
+        conteudo = templates.renderizar(projeto, canal)
+        caminho = armazenamento.salvar(f"artes/{arte.id}", "v1.png", conteudo)
+        db.add(VersaoArte(
+            arte_id=arte.id,
+            numero=1,
+            arquivo=caminho,
+            largura=formato["largura"],
+            altura=formato["altura"],
+            origem="template",
+            nota="Renderizada a partir dos campos confirmados do briefing.",
+            template_dados=templates.dados_do_projeto(projeto),
+            criado_por=usuario["id"],
+        ))
+        db.add(EventoDecisao(
+            tipo="template_gerado",
+            usuario=usuario["id"],
+            payload={"projeto_id": projeto.id, "arte_id": arte.id, "canal": canal},
+        ))
+        criadas.append(arte)
+    db.commit()
+    for arte in criadas:
+        db.refresh(arte, attribute_names=["versoes"])
+    return {"mensagem": f"{len(criadas)} peça(s) gerada(s) por template.",
+            "artes": [ser_arte(arte) for arte in criadas]}
 
 
 @router.get("/projetos/{projeto_id}/briefing")

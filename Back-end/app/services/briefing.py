@@ -9,6 +9,7 @@ import unicodedata
 from datetime import date
 from pathlib import Path
 
+from app.config import settings
 from app.services.erros import ErroNegocio
 from app.services.formatos import detectar_canais
 
@@ -38,12 +39,22 @@ def ler_paginas(nome: str, conteudo: bytes) -> tuple[list[str], bool]:
         if ext == ".pdf":
             from pypdf import PdfReader
 
-            return [(p.extract_text() or "") for p in PdfReader(io.BytesIO(conteudo)).pages], True
+            paginas_pdf = PdfReader(io.BytesIO(conteudo)).pages
+            if len(paginas_pdf) > settings.max_briefing_pages:
+                raise ErroNegocio(413, f"O PDF excede {settings.max_briefing_pages} páginas.")
+            paginas = [(p.extract_text() or "") for p in paginas_pdf]
+            if any(not pagina.strip() for pagina in paginas):
+                paginas = _ocr_paginas_pdf(conteudo, paginas)
+            return paginas, True
         if ext == ".docx":
             import docx
 
             doc = docx.Document(io.BytesIO(conteudo))
-            return ["\n".join(p.text for p in doc.paragraphs)], False
+            linhas = [p.text for p in doc.paragraphs]
+            for tabela in doc.tables:
+                for linha in tabela.rows:
+                    linhas.append(" | ".join(celula.text.strip() for celula in linha.cells))
+            return ["\n".join(linhas)], False
         if ext == ".txt":
             try:
                 return [conteudo.decode("utf-8-sig")], False
@@ -54,6 +65,29 @@ def ler_paginas(nome: str, conteudo: bytes) -> tuple[list[str], bool]:
     except Exception as exc:
         raise ErroNegocio(422, "Não foi possível ler o documento. Confira se o arquivo não está corrompido.") from exc
     raise ErroNegocio(415, "Envie um arquivo PDF, DOCX ou TXT.")
+
+
+def _ocr_paginas_pdf(conteudo: bytes, paginas: list[str]) -> list[str]:
+    """Aplica OCR somente às páginas sem texto selecionável e preserva a paginação."""
+    import cv2
+    import numpy as np
+    import pypdfium2 as pdfium
+
+    from app.services import ocr
+
+    documento = pdfium.PdfDocument(conteudo)
+    motor = ocr.obter_motor()
+    resultado = list(paginas)
+    for indice, texto in enumerate(resultado):
+        if texto.strip():
+            continue
+        pil = documento[indice].render(scale=2).to_pil().convert("RGB")
+        imagem = cv2.cvtColor(np.asarray(pil), cv2.COLOR_RGB2BGR)
+        linhas = sorted(motor.ler(imagem), key=lambda item: (item.y, item.x))
+        resultado[indice] = "\n".join(
+            linha.texto for linha in linhas if linha.confianca >= settings.ocr_confianca_min
+        )
+    return resultado
 
 
 def _detectar_rotulo(linha: str) -> tuple[str | None, str]:
@@ -97,7 +131,7 @@ def _parse_data(texto: str) -> date | None:
 
 
 def extrair_campos(paginas: list[str], paginado: bool) -> dict:
-    campos = {k: {"valor": None, "pagina": None, "encontrado": False} for k in
+    campos = {k: {"valor": None, "pagina": None, "encontrado": False, "estado": "not_found"} for k in
               ("nome_campanha", "produto", "preco", "canais", "prazo",
                "informacoes_obrigatorias", "objetivo", "orientacoes")}
     blocos: dict[str, list[str]] = {}
@@ -121,20 +155,29 @@ def extrair_campos(paginas: list[str], paginado: bool) -> dict:
                 continue
             if rotulo_atual is None:
                 if not campos["nome_campanha"]["encontrado"] and not IGNORAR_TITULO.search(linha):
-                    campos["nome_campanha"] = {"valor": linha, "pagina": pagina, "encontrado": True}
+                    campos["nome_campanha"] = {"valor": linha, "pagina": pagina,
+                                                "encontrado": True, "estado": "found",
+                                                "trecho": linha}
                 continue
             blocos[rotulo_atual].append(linha)
 
     def preencher(chave_campo: str, chave_bloco: str, valor):
         if valor:
-            campos[chave_campo] = {"valor": valor, "pagina": pagina_do_bloco.get(chave_bloco), "encontrado": True}
+            campos[chave_campo] = {"valor": valor, "pagina": pagina_do_bloco.get(chave_bloco),
+                                   "encontrado": True, "estado": "found",
+                                   "trecho": " ".join(blocos.get(chave_bloco, [])).strip()}
 
     for chave in ("produto", "informacoes_obrigatorias", "objetivo", "orientacoes"):
         preencher(chave, chave, " ".join(blocos.get(chave, [])).strip())
 
     texto_preco = " ".join(blocos.get("preco", []))
-    precos = [f"{m.group(1)},{m.group(2)}" for m in RE_PRECO.finditer(texto_preco)]
-    preencher("preco", "preco", precos[0] if precos else None)
+    precos = list(dict.fromkeys(f"{m.group(1)},{m.group(2)}" for m in RE_PRECO.finditer(texto_preco)))
+    if len(precos) == 1:
+        preencher("preco", "preco", precos[0])
+    elif len(precos) > 1:
+        campos["preco"] = {"valor": None, "pagina": pagina_do_bloco.get("preco"),
+                           "encontrado": False, "estado": "conflict", "candidatos": precos,
+                           "trecho": texto_preco}
 
     preencher("canais", "canais", detectar_canais(" ".join(blocos.get("canais", []))))
 
@@ -150,4 +193,6 @@ def avisos_do_briefing(campos: dict, paginas: list[str]) -> list[str]:
                       "Preencha as informações manualmente.")
     if not campos["prazo"]["encontrado"]:
         avisos.append("Prazo não informado. Você pode definir depois, sem alterar o documento original.")
+    if campos["preco"].get("estado") == "conflict":
+        avisos.append("Mais de um preço foi encontrado. Confirme manualmente qual valor pertence ao produto.")
     return avisos

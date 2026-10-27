@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     max_upload_mb: int = 20
     min_largura: int = 320
     min_altura: int = 320
+    max_pixels_arte: int = 40_000_000
+    max_briefing_pages: int = 30
     min_nitidez: float = 20.0
 
     # --- Usuários de demonstração (header X-Usuario) ---
@@ -31,7 +33,7 @@ class Settings(BaseSettings):
 
     # --- OCR (PaddleOCR) ---
     ocr_motor: str = "paddle"
-    ocr_lang: str = "latin"          # confirme no 1º teste real (cobre português)
+    ocr_lang: str = "pt"
     ocr_confianca_min: float = 0.6
 
     # --- Ortografia (LanguageTool local) ---

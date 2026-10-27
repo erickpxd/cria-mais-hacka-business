@@ -11,10 +11,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /code
 
 COPY requirements.txt requirements-ocr.txt ./
-RUN pip install --no-cache-dir -r requirements.txt \
+RUN pip install --no-cache-dir --upgrade pip setuptools \
+    && pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir -r requirements-ocr.txt
 
 COPY ./app ./app
+COPY alembic.ini ./
+COPY migrations ./migrations
 
 EXPOSE 80
-CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "80"]
+CMD ["sh", "-c", "alembic upgrade head && python -m uvicorn app.main:app --host 0.0.0.0 --port 80"]
