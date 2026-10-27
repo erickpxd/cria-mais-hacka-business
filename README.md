@@ -1,256 +1,96 @@
-# Hackton Avanade - Análise inteligente de imagens
+# Cria Mais — POC funcional
 
-Aplicação desenvolvida para o desafio Pague Menos. O sistema recebe uma imagem,
-faz uma validação técnica local e, quando a imagem atende aos requisitos básicos,
-encaminha o arquivo para um modelo de visão executado pelo Ollama. O resultado
-informa se a imagem foi aprovada, em qual etapa ocorreu a decisão e os motivos
-da reprovação, quando aplicável.
+O Cria Mais organiza briefings, artes, versões e aprovação humana em uma demonstração persistente. O login é propositalmente mockado no frontend; todo o restante do fluxo principal usa a API e o banco local.
 
-## O que foi modificado
+## O que funciona
 
-### Backend
+- Personas demo: Ana (Criador) e Rafael (Revisor), alternáveis pela interface.
+- Projeto e briefing manual persistidos em SQLite.
+- Extração determinística de PDF, DOCX e TXT, incluindo tabelas DOCX e OCR de páginas escaneadas, com campos ausentes e conflitos explícitos.
+- Upload real de PNG/JPG, original imutável e novas versões vinculadas.
+- OCR local com preço, ortografia e margem, usando estados `queued`, `processing`, `completed` e `failed`.
+- Geração por template editável em Feed, Stories, WhatsApp e Banner.
+- Prévia lado a lado e criação de nova versão ao editar campos do template.
+- Submissão, devolução com comentário obrigatório, aprovação humana e exportação da versão aprovada.
+- Histórico de versões e decisões.
 
-- Migração da API para **FastAPI**, com execução assíncrona.
-- Criação de um fluxo de análise em duas etapas:
-  1. validação técnica rápida, usando OpenCV;
-  2. análise semântica da imagem por um modelo de visão no Ollama.
-- Validações de entrada antes do processamento:
-  - tipo MIME da imagem;
-  - tamanho máximo do arquivo;
-  - arquivo vazio;
-  - imagem inválida ou impossível de decodificar.
-- Validação de critérios técnicos, como:
-  - resolução mínima;
-  - proporção esperada;
-  - nitidez mínima.
-- Uso de `asyncio.to_thread` para executar as operações de CPU do OpenCV
-  sem bloquear o servidor assíncrono.
-- Definição de schemas de resposta com Pydantic.
-- Tratamento explícito de falhas de comunicação com o Ollama, incluindo:
-  - timeout;
-  - modelo ainda não baixado;
-  - indisponibilidade do serviço;
-  - resposta fora do formato JSON esperado.
-- Inclusão de endpoint de saúde para verificar o Ollama e a disponibilidade
-  do modelo de visão.
-- Manutenção de um endpoint separado para extração de texto manuscrito por OCR.
+Correção automática de bitmaps arbitrários e adaptação por outpainting não são apresentadas como prontas: essas rotas retornam `501`. O caminho confiável da POC é o template estruturado.
 
-### Frontend
+## Executar
 
-- Aplicação criada com **React, TypeScript e Vite**.
-- Componente de seleção de imagem com:
-  - seletor de arquivos nativo;
-  - filtro para arquivos de imagem;
-  - pré-visualização local antes do envio;
-  - callback para integração com a API.
-- Estrutura inicial para seleção de idioma.
-- Comunicação com o backend por meio do caminho `/api`, encaminhado pelo Nginx.
-- Configuração de desenvolvimento com atualização automática dos arquivos
-  usando o recurso `develop.watch` do Docker Compose.
-
-### Infraestrutura e execução
-
-- Conteinerização do frontend e do backend.
-- Inclusão do Ollama como serviço independente.
-- Download automático do modelo de visão na inicialização da stack.
-- Inclusão do Nginx como proxy reverso:
-  - `/` encaminha para o frontend;
-  - `/api` encaminha para o backend.
-- Rede Docker compartilhada entre os serviços.
-- Possibilidade de habilitar GPU NVIDIA no serviço do Ollama, quando disponível.
-
-## Arquitetura
-
-```text
-Navegador
-   |
-   v
-Nginx (porta 80)
-   |------------------------------|
-   v                              v
-Frontend React/Vite          Backend FastAPI (porta 3000)
-                                  |
-                                  v
-                           Ollama (porta 11434)
-                                  |
-                                  v
-                           Modelo de visão
-```
-
-O frontend é servido pelo Vite dentro do container. O Nginx centraliza o acesso
-da aplicação e evita que o navegador precise conhecer diretamente as portas
-internas do frontend e do backend.
-
-## Fluxo de análise
-
-1. O usuário seleciona uma imagem no frontend.
-2. O componente de upload cria uma prévia local e envia o arquivo para a API.
-3. O backend valida o tipo, o tamanho e o conteúdo do arquivo.
-4. O OpenCV decodifica a imagem e executa as verificações técnicas.
-5. Se algum critério técnico falhar, a imagem é reprovada sem consumir o modelo
-   de visão.
-6. Se a imagem passar na etapa técnica, o backend envia o arquivo ao Ollama.
-7. O modelo avalia os critérios configurados e retorna um JSON estruturado.
-8. O backend valida a resposta do modelo e devolve o resultado ao frontend.
-
-Essa separação reduz o custo das análises e facilita a identificação da causa
-de uma reprovação.
-
-## API
-
-### `POST /api/analisar`
-
-Recebe uma imagem no campo multipart `file`.
-
-Possíveis resultados:
-
-- `200`: análise concluída;
-- `400`: arquivo vazio, inválido ou que não representa uma imagem;
-- `413`: arquivo acima do limite configurado;
-- `415`: tipo de arquivo não aceito;
-- `502`, `503` ou `504`: falha na comunicação ou na resposta do Ollama.
-
-O retorno inclui o nome do arquivo, o status de aprovação, a etapa responsável
-pela decisão, a categoria identificada e os motivos encontrados.
-
-### `GET /api/saude`
-
-Verifica:
-
-- se o Ollama está respondendo;
-- se o modelo de visão está disponível para uso.
-
-### `POST /api/uploadHandwriting`
-
-Recebe uma imagem e solicita a extração do texto ao modelo configurado para
-OCR. O retorno contém o nome do arquivo e o texto extraído.
-
-## Tecnologias utilizadas
-
-- **Frontend:** React, TypeScript, Vite e React Router.
-- **Backend:** Python, FastAPI, Pydantic e OpenCV.
-- **IA:** Ollama com modelo de visão compatível, como `llava`.
-- **Proxy reverso:** Nginx.
-- **Execução:** Docker e Docker Compose.
-
-## Como executar
-
-### Pré-requisitos
-
-- Docker Desktop ou Docker Engine com Docker Compose;
-- aproximadamente o espaço em disco necessário para as imagens Docker e o
-  modelo de IA;
-- opcionalmente, GPU NVIDIA configurada para acelerar o Ollama.
-
-### Subir a aplicação
-
-Na raiz do projeto, execute:
+Pré-requisito: Docker com Compose.
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 
-Para acompanhar os logs em primeiro plano:
+Acessos:
 
-```bash
-docker compose up
-```
+- Aplicação: <http://localhost>
+- OpenAPI: <http://localhost:3000/docs>
+- Saúde básica: <http://localhost:3000/health>
+- Dependências: <http://localhost:3000/api/v1/health/dependencies>
 
-O serviço de inicialização do Ollama baixa o modelo configurado antes de o
-backend realizar as análises. Para acompanhar esse processo:
-
-```bash
-docker compose logs -f ollama-init
-```
-
-Depois, acesse:
-
-```text
-http://localhost/
-```
-
-O backend também é exposto diretamente em:
-
-```text
-http://localhost:3000
-```
-
-### Encerrar a aplicação
+Para parar os containers sem apagar dados:
 
 ```bash
 docker compose down
 ```
 
-Para remover também os volumes locais associados aos serviços:
+Os dados ficam em `./data`, ignorado pelo Git.
 
-```bash
-docker compose down -v
-```
+## Desenvolvimento e validação
 
-> A remoção dos volumes pode apagar o modelo baixado do Ollama e exigir um novo
-> download na próxima inicialização.
-
-## Estrutura do projeto
-
-```text
-.
-├── Back-end/
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   ├── app/
-│   │   ├── config.py       # Configurações da aplicação e dos critérios
-│   │   ├── main.py         # Criação da aplicação FastAPI
-│   │   └── schemas.py      # Contratos das requisições e respostas
-│   ├── routes/
-│   │   └── images.py       # Endpoints de upload, análise e saúde
-│   └── services/
-│       ├── technician.py   # Validações técnicas com OpenCV
-│       ├── vision.py       # Integração com o Ollama
-│       └── outpainting.py   # Serviço de expansão de imagem
-├── Front-end/
-│   ├── Dockerfile
-│   ├── Dockerfile.dev
-│   └── app/
-│       └── src/
-│           ├── App.tsx
-│           └── components/
-│               ├── FileLoader.tsx
-│               └── LanguageSelector.tsx
-├── docker-compose.yaml
-└── nginx.conf
-```
-
-## Desenvolvimento
-
-O Compose observa alterações no código durante o desenvolvimento:
-
-- alterações em `Back-end/app` são sincronizadas no container do backend;
-- alterações em `Front-end/app` são sincronizadas no container do frontend;
-- mudanças nos arquivos de dependências provocam a reconstrução do serviço
-  correspondente.
-
-Para executar os comandos do frontend localmente:
+Frontend:
 
 ```bash
 cd Front-end/app
 npm install
-npm run dev
+npm run lint
+npm run build
+npm run test:e2e
+npm audit --omit=dev
 ```
 
-Comandos disponíveis:
+Backend pela mesma imagem da aplicação:
 
 ```bash
-npm run build
-npm run lint
-npm run preview
+docker compose run --rm --no-deps \
+  -v "$PWD/Back-end:/code" back-end \
+  sh -c 'pip install -q -r requirements-dev.txt && ruff check app tests migrations && pytest -q'
 ```
 
-## Observações
+As migrations rodam automaticamente antes do Uvicorn. Manualmente:
 
-- O primeiro uso pode demorar enquanto o Ollama baixa o modelo.
-- Uma falha na etapa técnica não chama o modelo de IA, reduzindo tempo e
-  consumo de recursos.
-- O nome e a URL do modelo são tratados pela configuração do backend e pelas
-  variáveis do serviço no Compose.
-- O diretório usado para os modelos do Ollama é persistido em volume para evitar
-  downloads repetidos.
+```bash
+docker compose run --rm back-end alembic upgrade head
+```
+
+Para validar a implantação com PostgreSQL em vez de SQLite:
+
+```bash
+POSTGRES_PASSWORD='troque-esta-senha' \
+docker compose -f docker-compose.yaml -f docker-compose.postgres.yaml up -d --build
+```
+
+## Arquitetura
+
+```text
+Browser → Nginx → React/Vite
+              └→ FastAPI /api/v1
+                    ├→ SQLite + storage local
+                    ├→ PaddleOCR local
+                    └→ LanguageTool local
+```
+
+Ollama e IOPaint permanecem opcionais e fora do fluxo demonstrável principal. Não são necessários para subir a POC.
+
+## Limites
+
+- `X-Demo-User` seleciona uma persona fictícia; não é autenticação de produção.
+- `BackgroundTasks` não é uma fila durável.
+- SQLite e armazenamento local servem somente à demonstração controlada.
+- O resultado automático auxilia a pessoa revisora e não representa aprovação regulatória.
+- Não existe publicação automática nem acesso presumido a dados corporativos.
+
+O diagnóstico detalhado está em [`docs/POC_BACKEND_IMPLEMENTACAO.md`](docs/POC_BACKEND_IMPLEMENTACAO.md), e o escopo original em [`PLANO_BACKEND_CRIAMAIS.md`](PLANO_BACKEND_CRIAMAIS.md).
